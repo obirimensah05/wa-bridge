@@ -9,6 +9,7 @@
     "url": "git+https://github.com/obirimensah05/wa-bridge.git"
   },
   "homepage": "https://github.com/obirimensah05/wa-bridge",
+  "license": "MIT",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
