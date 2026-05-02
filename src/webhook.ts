@@ -19,6 +19,8 @@ async function postOnce(url: string, body: unknown): Promise<Response> {
       headers,
       body: JSON.stringify(body),
       signal: controller.signal,
+      // Operator-set URL, but don't follow redirects to private hosts via 30x.
+      redirect: 'manual',
     })
   } finally {
     clearTimeout(timer)

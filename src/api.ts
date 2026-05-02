@@ -3,6 +3,7 @@ import pino from 'pino'
 import { readFileSync, existsSync } from 'node:fs'
 import { resolve, basename } from 'node:path'
 import { Buffer } from 'node:buffer'
+import { timingSafeEqual } from 'node:crypto'
 
 import { API_TOKEN, HOST, PORT } from './env.js'
 import { wa, normalizeJid } from './wa.js'
@@ -15,12 +16,21 @@ import {
   pushNameFor,
   phoneFor,
   reactionsFor,
+  receiptsFor,
   db,
 } from './db.js'
 import { dispatchTest } from './webhook.js'
 import { WEBHOOK_URL } from './env.js'
 
 const log = pino({ level: 'info' }).child({ mod: 'api' })
+
+// Centralized 5xx handler. We log the real error for the operator and return
+// a generic body to the client so internal state (Baileys, SQLite, paths,
+// session names) does not leak across the trust boundary.
+function internalError(reply: import('fastify').FastifyReply, err: unknown, op: string): void {
+  log.error({ op, err: (err as Error).message, stack: (err as Error).stack }, 'route failed')
+  reply.code(500).send({ error: 'internal' })
+}
 
 const MIME_BY_EXT: Record<string, string> = {
   jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
@@ -44,17 +54,24 @@ function lookupBody(session: string, fullId: string): string | null {
 }
 
 function enrichConvo(session: string, row: any) {
-  const display = row.chat_name ?? row.push_name ?? pushNameFor(session, row.chat_jid)
+  const isGroup = !!row.is_group
+  const display = isGroup
+    ? (row.chat_name ?? row.push_name ?? pushNameFor(session, row.chat_jid))
+    : (row.push_name ?? pushNameFor(session, row.chat_jid) ?? row.chat_name)
+  const lastBody = row.last_type === 'audio' && row.last_transcript
+    ? `[audio] ${row.last_transcript}`
+    : row.last_body
   return {
     chat_jid: row.chat_jid,
     is_group: !!row.is_group,
     archived: !!row.archived,
     pinned: !!row.pinned,
     unread_count: row.unread_count ?? 0,
+    participant_count: row.participant_count ?? null,
     display_name: display,
     phone: phoneFor(session, row.chat_jid),
     profile_pic_url: row.profile_pic_url ?? null,
-    last_body: row.last_body,
+    last_body: lastBody,
     last_direction: row.last_direction,
     last_type: row.last_type,
     last_ts: row.last_ts,
@@ -81,8 +98,30 @@ function enrichMessage(session: string, row: any) {
     ts: r.ts,
   }))
   const quoted = row.quoted_id ? { id: row.quoted_id, body_preview: lookupBody(session, row.quoted_id) } : null
+  const body = row.type === 'audio' && row.transcript
+    ? `[audio] ${row.transcript}`
+    : row.body
+  // Per-participant receipts — only attach if any exist. Returns the
+  // highest-state row per participant so the UI does not have to dedupe.
+  const rawReceipts = row.direction === 'out' ? receiptsFor(session, row.id) : []
+  const byParticipant = new Map<string, { participant: string; status: 'delivered' | 'read' | 'played'; ts: number }>()
+  const rank: Record<'delivered' | 'read' | 'played', number> = { delivered: 0, read: 1, played: 2 }
+  for (const r of rawReceipts) {
+    const cur = byParticipant.get(r.participant)
+    if (!cur || rank[r.status] > rank[cur.status]) {
+      byParticipant.set(r.participant, { participant: r.participant, status: r.status, ts: r.ts })
+    }
+  }
+  const receipts = Array.from(byParticipant.values()).map((r) => ({
+    participant: r.participant,
+    participant_label: pushNameFor(session, r.participant) ?? phoneFor(session, r.participant) ?? shortJid(r.participant),
+    participant_phone: phoneFor(session, r.participant),
+    status: r.status,
+    ts: r.ts,
+  }))
   return {
     ...row,
+    body,
     from_display_name,
     from_phone,
     from_label: from_display_name ?? from_phone ?? shortJid(row.from_jid),
@@ -90,6 +129,7 @@ function enrichMessage(session: string, row: any) {
     media_url: mediaUrl(row.media_path),
     reactions,
     quoted,
+    ...(receipts.length ? { receipts } : {}),
   }
 }
 
@@ -102,10 +142,27 @@ function gcIdempotency() {
 }
 setInterval(gcIdempotency, 60_000).unref()
 
+// SSRF guard: reject anything that isn't a public http(s) URL. Blocks loopback,
+// link-local (169.254/16, including AWS/Hostinger metadata at 169.254.169.254),
+// RFC1918 ranges, and IPv6 loopback/ULA. Disables redirect-following so a 302
+// can't bypass the check by sending us to internal infra.
+const PRIVATE_HOST_RE =
+  /^(localhost|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|::1|fc|fd|0\.|255\.)/i
+
 async function fetchToBuffer(url: string): Promise<{ buf: Buffer; mime: string | null }> {
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`fetch ${url} failed: HTTP ${res.status}`)
+  const u = new URL(url)
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error('media_url must be http(s)')
+  }
+  if (PRIVATE_HOST_RE.test(u.hostname)) {
+    throw new Error('media_url host blocked')
+  }
+  const res = await fetch(url, { redirect: 'error' })
+  if (!res.ok) throw new Error(`media fetch failed: HTTP ${res.status}`)
+  const len = Number(res.headers.get('content-length') ?? 0)
+  if (len > 25 * 1024 * 1024) throw new Error('media too large')
   const arr = new Uint8Array(await res.arrayBuffer())
+  if (arr.byteLength > 25 * 1024 * 1024) throw new Error('media too large')
   const mime = res.headers.get('content-type')?.split(';')[0]?.trim() ?? null
   return { buf: Buffer.from(arr), mime }
 }
@@ -113,24 +170,46 @@ async function fetchToBuffer(url: string): Promise<{ buf: Buffer; mime: string |
 export async function startApi(): Promise<void> {
   const app = Fastify({ logger: false, bodyLimit: 50 * 1024 * 1024 })
 
+  const tokenBuf = Buffer.from(API_TOKEN, 'utf8')
+
   app.addHook('preHandler', async (req, reply) => {
     const path = req.url.split('?')[0]
-    if (path === '/v1/health' || path === '/' || path === '/index.html') return
+    if (path === '/v1/health' || path === '/') return
 
     const headerAuth = req.headers.authorization
-    const queryAuth = (req.query as any)?.token
     const provided =
-      headerAuth?.startsWith('Bearer ') ? headerAuth.slice(7) : (queryAuth ?? '')
+      headerAuth?.startsWith('Bearer ') ? headerAuth.slice(7) : ''
 
-    if (provided !== API_TOKEN) {
+    const givenBuf = Buffer.from(provided, 'utf8')
+    const ok = givenBuf.length === tokenBuf.length && timingSafeEqual(givenBuf, tokenBuf)
+    if (!ok) {
       reply.code(401).send({ error: 'unauthorized' })
+      return
     }
   })
 
   // ---- static ----
   const indexHtml = readFileSync(resolve('./web/index.html'), 'utf8')
+  // Strict CSP — UI uses inline <script>/<style> by design (single-file SPA),
+  // so 'unsafe-inline' is required for now. Media is loaded via fetch as Blob,
+  // so blob: must be allowed. Connect-src 'self' covers the API loopback.
+  const CSP =
+    "default-src 'self'; " +
+    "img-src 'self' blob: data: https:; " +
+    "media-src 'self' blob:; " +
+    "connect-src 'self'; " +
+    "script-src 'self' 'unsafe-inline'; " +
+    "style-src 'self' 'unsafe-inline'; " +
+    "object-src 'none'; " +
+    "base-uri 'self'; " +
+    "frame-ancestors 'none'"
   app.get('/', async (_req, reply) => {
-    reply.type('text/html').send(indexHtml)
+    reply
+      .header('Content-Security-Policy', CSP)
+      .header('Referrer-Policy', 'no-referrer')
+      .header('X-Content-Type-Options', 'nosniff')
+      .type('text/html')
+      .send(indexHtml)
   })
 
   app.get<{ Params: { session: string; file: string } }>(
@@ -244,10 +323,7 @@ export async function startApi(): Promise<void> {
         const payload = { ok: true, ...result }
         if (idemKey) idempotencyCache.set(idemKey, { ts: Date.now(), payload })
         return payload
-      } catch (err) {
-        log.error({ err: (err as Error).message }, 'send failed')
-        reply.code(500).send({ error: (err as Error).message })
-      }
+      } catch (err) { internalError(reply, err, 'send') }
     },
   )
 
@@ -263,7 +339,7 @@ export async function startApi(): Promise<void> {
       try {
         await wa.sendReaction(session, message_id, chat_jid, emoji)
         return { ok: true }
-      } catch (err) { reply.code(500).send({ error: (err as Error).message }) }
+      } catch (err) { internalError(reply, err, 'route') }
     },
   )
 
@@ -278,7 +354,7 @@ export async function startApi(): Promise<void> {
       try {
         await wa.deleteMessage(session, message_id, chat_jid, from_me, participant)
         return { ok: true }
-      } catch (err) { reply.code(500).send({ error: (err as Error).message }) }
+      } catch (err) { internalError(reply, err, 'route') }
     },
   )
 
@@ -291,7 +367,7 @@ export async function startApi(): Promise<void> {
       try {
         await wa.sendPresence(session, jid, state)
         return { ok: true, state }
-      } catch (err) { reply.code(500).send({ error: (err as Error).message }) }
+      } catch (err) { internalError(reply, err, 'route') }
     },
   )
 
@@ -306,7 +382,7 @@ export async function startApi(): Promise<void> {
       try {
         await wa.markRead(session, jid, message_ids)
         return { ok: true, marked: message_ids.length }
-      } catch (err) { reply.code(500).send({ error: (err as Error).message }) }
+      } catch (err) { internalError(reply, err, 'route') }
     },
   )
 
@@ -319,7 +395,7 @@ export async function startApi(): Promise<void> {
       try {
         const r = await wa.checkOnWhatsApp(session, phone)
         return { phone, ...r }
-      } catch (err) { reply.code(500).send({ error: (err as Error).message }) }
+      } catch (err) { internalError(reply, err, 'route') }
     },
   )
 
@@ -331,7 +407,7 @@ export async function startApi(): Promise<void> {
       const jid = req.query.jid
       if (!jid) { reply.code(400).send({ error: 'jid required' }); return }
       try { return await wa.groupInfo(session, jid) }
-      catch (err) { reply.code(500).send({ error: (err as Error).message }) }
+      catch (err) { internalError(reply, err, 'route') }
     },
   )
 
@@ -342,7 +418,7 @@ export async function startApi(): Promise<void> {
       const jid = req.query.jid
       if (!jid) { reply.code(400).send({ error: 'jid required' }); return }
       try { return { invite_url: await wa.groupInviteLink(session, jid) } }
-      catch (err) { reply.code(500).send({ error: (err as Error).message }) }
+      catch (err) { internalError(reply, err, 'route') }
     },
   )
 
@@ -353,7 +429,7 @@ export async function startApi(): Promise<void> {
       const jid = req.body.jid
       if (!jid) { reply.code(400).send({ error: 'jid required' }); return }
       try { await wa.groupLeave(session, jid); return { ok: true } }
-      catch (err) { reply.code(500).send({ error: (err as Error).message }) }
+      catch (err) { internalError(reply, err, 'route') }
     },
   )
 
@@ -368,7 +444,7 @@ export async function startApi(): Promise<void> {
       try {
         const normalized = participants.map((p) => normalizeJid(p))
         return { results: await wa.groupParticipants(session, jid, normalized, action) }
-      } catch (err) { reply.code(500).send({ error: (err as Error).message }) }
+      } catch (err) { internalError(reply, err, 'route') }
     },
   )
 
@@ -381,7 +457,7 @@ export async function startApi(): Promise<void> {
       try {
         const url = await wa.fetchProfilePicture(session, jid)
         return { jid, profile_pic_url: url }
-      } catch (err) { reply.code(500).send({ error: (err as Error).message }) }
+      } catch (err) { internalError(reply, err, 'route') }
     },
   )
 
@@ -405,7 +481,7 @@ export async function startApi(): Promise<void> {
       try {
         upsertAlias(session, alias, canonical)
         return { ok: true, session, alias, canonical }
-      } catch (err) { reply.code(400).send({ error: (err as Error).message }) }
+      } catch (err) { internalError(reply, err, 'route-400') }
     },
   )
 

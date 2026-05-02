@@ -78,6 +78,18 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_reactions_message
     ON reactions(session, message_id);
+
+  CREATE TABLE IF NOT EXISTS message_receipts (
+    session     TEXT NOT NULL,
+    message_id  TEXT NOT NULL,
+    participant TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    ts          INTEGER NOT NULL,
+    PRIMARY KEY (session, message_id, participant, status)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_receipts_msg
+    ON message_receipts(session, message_id);
 `)
 
 // Idempotent column migrations for messages and chats
@@ -89,8 +101,10 @@ const migrations = [
   `ALTER TABLE messages ADD COLUMN deleted_at INTEGER`,
   `ALTER TABLE messages ADD COLUMN media_mime TEXT`,
   `ALTER TABLE messages ADD COLUMN media_size INTEGER`,
+  `ALTER TABLE messages ADD COLUMN transcript TEXT`,
   `ALTER TABLE chats ADD COLUMN profile_pic_url TEXT`,
   `ALTER TABLE contacts ADD COLUMN profile_pic_url TEXT`,
+  `ALTER TABLE chats ADD COLUMN participant_count INTEGER`,
 ]
 for (const sql of migrations) {
   try { db.exec(sql) } catch { /* column already exists */ }
@@ -232,6 +246,9 @@ const updateMessageEditedStmt = db.prepare(`
 const updateMessageDeletedStmt = db.prepare(`
   UPDATE messages SET deleted_at = ? WHERE id = ?
 `)
+const updateMessageTranscriptStmt = db.prepare(`
+  UPDATE messages SET transcript = ? WHERE id = ?
+`)
 const upsertReactionStmt = db.prepare(`
   INSERT INTO reactions (session, message_id, from_jid, emoji, ts)
   VALUES (@session, @message_id, @from_jid, @emoji, @ts)
@@ -250,12 +267,24 @@ const reactionsForStmt = db.prepare(`
 const updateChatPicStmt = db.prepare(`
   UPDATE chats SET profile_pic_url = ?, updated_at = ? WHERE session = ? AND jid = ?
 `)
+const updateChatParticipantCountStmt = db.prepare(`
+  UPDATE chats SET participant_count = ?, updated_at = ? WHERE session = ? AND jid = ?
+`)
 const updateContactPicStmt = db.prepare(`
   UPDATE contacts SET profile_pic_url = ?, last_seen = ? WHERE jid = ?
 `)
 
 export function updateMessageStatus(id: string, status: DeliveryStatus): void {
   updateMessageStatusStmt.run(status, id)
+}
+
+const getMessageStatusStmt = db.prepare(
+  `SELECT delivery_status FROM messages WHERE id = ?`,
+)
+
+export function getMessageDeliveryStatus(id: string): DeliveryStatus | null {
+  const row = getMessageStatusStmt.get(id) as { delivery_status: DeliveryStatus | null } | undefined
+  return row?.delivery_status ?? null
 }
 
 export function updateMessageMedia(
@@ -273,6 +302,10 @@ export function markMessageEdited(id: string, newBody: string | null): void {
 
 export function markMessageDeleted(id: string): void {
   updateMessageDeletedStmt.run(Date.now(), id)
+}
+
+export function setMessageTranscript(id: string, transcript: string | null): void {
+  updateMessageTranscriptStmt.run(transcript, id)
 }
 
 export interface ReactionInput {
@@ -299,8 +332,47 @@ export function reactionsFor(session: string, messageId: string) {
   }>
 }
 
+const upsertReceiptStmt = db.prepare(`
+  INSERT OR IGNORE INTO message_receipts
+    (session, message_id, participant, status, ts)
+  VALUES
+    (@session, @message_id, @participant, @status, @ts)
+`)
+
+const receiptsForStmt = db.prepare(`
+  SELECT participant, status, ts FROM message_receipts
+  WHERE session = ? AND message_id = ?
+  ORDER BY ts ASC
+`)
+
+export type ReceiptStatus = 'delivered' | 'read' | 'played'
+
+export interface ReceiptInput {
+  session: string
+  message_id: string
+  participant: string
+  status: ReceiptStatus
+  ts: number
+}
+
+export function upsertReceipt(r: ReceiptInput): void {
+  upsertReceiptStmt.run(r)
+}
+
+export function receiptsFor(session: string, messageId: string) {
+  return receiptsForStmt.all(session, messageId) as Array<{
+    participant: string
+    status: ReceiptStatus
+    ts: number
+  }>
+}
+
 export function setChatProfilePic(session: string, jid: string, url: string | null): void {
   updateChatPicStmt.run(url, Date.now(), session, jid)
+}
+
+export function setChatParticipantCount(session: string, jid: string, count: number | null): void {
+  updateChatParticipantCountStmt.run(count, Date.now(), session, jid)
 }
 
 export function setContactProfilePic(jid: string, url: string | null): void {
@@ -386,7 +458,7 @@ export function listConversations(session: string, limit = 100) {
   return db
     .prepare(
       `WITH msg_canon AS (
-         SELECT m.body, m.direction, m.type, m.ts,
+         SELECT m.body, m.transcript, m.direction, m.type, m.ts,
                 COALESCE(a.canonical, m.chat_jid) AS canonical_jid
          FROM messages m
          LEFT JOIN jid_aliases a
@@ -394,14 +466,14 @@ export function listConversations(session: string, limit = 100) {
          WHERE m.session = @session
        ),
        last_msg AS (
-         SELECT canonical_jid, body, direction, type, ts,
+         SELECT canonical_jid, body, transcript, direction, type, ts,
                 ROW_NUMBER() OVER (PARTITION BY canonical_jid ORDER BY ts DESC) AS rn
          FROM msg_canon
        ),
        chat_canon AS (
          SELECT COALESCE(a.canonical, ch.jid) AS canonical_jid,
                 ch.name, ch.is_group, ch.archived, ch.pinned,
-                ch.unread_count, ch.last_msg_ts
+                ch.unread_count, ch.last_msg_ts, ch.participant_count
          FROM chats ch
          LEFT JOIN jid_aliases a
            ON a.session = ch.session AND a.alias = ch.jid
@@ -419,9 +491,11 @@ export function listConversations(session: string, limit = 100) {
          COALESCE(cc.archived, 0)                 AS archived,
          COALESCE(cc.pinned, 0)                   AS pinned,
          cc.unread_count,
+         cc.participant_count,
          co.push_name,
          COALESCE(co.profile_pic_url, ch_pic.profile_pic_url) AS profile_pic_url,
          lm.body                                  AS last_body,
+         lm.transcript                            AS last_transcript,
          lm.direction                             AS last_direction,
          lm.type                                  AS last_type,
          COALESCE(lm.ts, cc.last_msg_ts)          AS last_ts
@@ -445,9 +519,11 @@ export function listConversations(session: string, limit = 100) {
       archived: number
       pinned: number
       unread_count: number | null
+      participant_count: number | null
       push_name: string | null
       profile_pic_url: string | null
       last_body: string | null
+      last_transcript: string | null
       last_direction: Direction | null
       last_type: string | null
       last_ts: number | null
@@ -464,7 +540,7 @@ export function listMessages(
   const placeholders = jids.map(() => '?').join(',')
   const sql = `
     SELECT id, ts, direction, from_jid, chat_jid, type, body,
-           media_path, media_mime, media_size,
+           media_path, media_mime, media_size, transcript,
            sent_by, delivery_status, quoted_id, edited_at, deleted_at
     FROM messages
     WHERE session = ?
@@ -490,6 +566,7 @@ export function listMessages(
     media_path: string | null
     media_mime: string | null
     media_size: number | null
+    transcript: string | null
     sent_by: SentBy | null
     delivery_status: DeliveryStatus | null
     quoted_id: string | null

@@ -3,8 +3,20 @@ import pino from 'pino'
 
 import { wa, scanRegisteredSessions } from './wa.js'
 import { startApi } from './api.js'
+import { HOST } from './env.js'
 
 const log = pino({ level: 'info' }).child({ mod: 'main' })
+
+// Refuse to bind to a non-loopback address unless the operator has acknowledged
+// the implications (single bearer token vs. the public internet, no rate limit).
+// Set WA_ALLOW_PUBLIC=1 in .env after putting this behind a reverse proxy with TLS.
+if (HOST !== '127.0.0.1' && HOST !== 'localhost' && process.env.WA_ALLOW_PUBLIC !== '1') {
+  log.error(
+    { host: HOST },
+    'refusing to bind a non-loopback HOST without WA_ALLOW_PUBLIC=1 — put a TLS-terminating reverse proxy in front and set the flag',
+  )
+  process.exit(1)
+}
 
 const arg1 = process.argv[2]
 const arg2 = process.argv[3]

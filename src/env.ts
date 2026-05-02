@@ -45,3 +45,4 @@ export const PORT = Number(process.env.PORT ?? 8080)
 export const HOST = process.env.HOST ?? '127.0.0.1'
 export const WEBHOOK_URL = process.env.WEBHOOK_URL?.trim() || null
 export const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN?.trim() || null
+export const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() || null

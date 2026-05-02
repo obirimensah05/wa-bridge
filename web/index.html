@@ -107,6 +107,22 @@
   .bubble.deleted { opacity: 0.55; font-style: italic; }
   .bubble .ticks { display: inline-block; margin-left: 4px; color: var(--muted); font-size: 11px; }
   .bubble .ticks.read { color: #34b7f1; }
+  .bubble .read-by { display: inline-block; margin-left: 6px; color: var(--muted); font-size: 11px;
+    cursor: pointer; position: relative; }
+  .bubble .read-by:hover { color: var(--text); }
+  .bubble .read-by .panel { display: none; position: absolute; bottom: 100%; right: 0; margin-bottom: 4px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px;
+    min-width: 200px; max-width: 260px; box-shadow: 0 4px 16px rgba(0,0,0,0.4); z-index: 5;
+    text-align: left; white-space: normal; }
+  .bubble .read-by.open .panel,
+  .bubble .read-by:hover .panel { display: block; }
+  .bubble .read-by .row { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0;
+    font-size: 11px; color: var(--text); }
+  .bubble .read-by .row .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bubble .read-by .row .when { color: var(--muted); flex-shrink: 0; }
+  .bubble .read-by .row .st { font-size: 10px; padding: 0 4px; border-radius: 3px; background: var(--panel-2);
+    color: var(--muted); flex-shrink: 0; }
+  .bubble .read-by .row .st.read, .bubble .read-by .row .st.played { color: #34b7f1; }
   .bubble .actions { position: absolute; top: 4px; right: 6px; display: none; gap: 4px;
     background: rgba(0,0,0,0.5); border-radius: 6px; padding: 2px 4px; }
   .bubble:hover .actions { display: flex; }
@@ -204,6 +220,36 @@ function statusTicks(direction, status) {
   return '';
 }
 
+function readBySummary(receipts, participantCount) {
+  if (!receipts || !receipts.length) return '';
+  const readers = receipts.filter((r) => r.status === 'read' || r.status === 'played').length;
+  const delivered = receipts.filter((r) => r.status === 'delivered').length;
+  const denom = participantCount && participantCount > 1 ? participantCount - 1 : null; // exclude self
+  const numerator = readers;
+  const label = denom != null
+    ? `Read by ${numerator}/${denom}`
+    : `Read by ${numerator}`;
+  const rows = receipts
+    .slice()
+    .sort((a, b) => b.ts - a.ts)
+    .map((r) => {
+      const cls = (r.status === 'read' || r.status === 'played') ? r.status : '';
+      return `<div class="row">
+        <span class="who">${escapeHtml(r.participant_label || r.participant)}</span>
+        <span class="st ${cls}">${escapeHtml(r.status)}</span>
+        <span class="when">${escapeHtml(fmtTime(r.ts))}</span>
+      </div>`;
+    })
+    .join('');
+  const deliveredNote = (delivered && denom != null)
+    ? `<div class="row" style="border-top:1px solid var(--border);margin-top:4px;padding-top:4px">
+        <span class="who">Delivered to</span>
+        <span class="when">${delivered}</span>
+       </div>`
+    : '';
+  return `<span class="read-by" data-readby="1">${label}<span class="panel">${rows}${deliveredNote}</span></span>`;
+}
+
 // ---------- API ----------
 async function api(path, init = {}) {
   const res = await fetch(path, {
@@ -248,9 +294,30 @@ async function markReadCall(session, jid, ids) {
   return api('/v1/read', { method: 'POST', body: JSON.stringify({ session, jid, message_ids: ids }) });
 }
 
-function mediaUrlWithToken(rel) {
+// Media is fetched via Authorization header (NOT a query-string token, which would
+// land in browser history and reverse-proxy access logs). Each successfully fetched
+// asset becomes a blob: URL the browser can render. Cached for the session.
+const mediaBlobCache = new Map();
+async function loadMediaBlob(rel) {
   if (!rel) return null;
-  return `${rel}?token=${encodeURIComponent(state.token)}`;
+  const cached = mediaBlobCache.get(rel);
+  if (cached) return cached;
+  const res = await fetch(rel, { headers: { Authorization: `Bearer ${state.token}` } });
+  if (!res.ok) throw new Error(`media ${res.status}`);
+  const url = URL.createObjectURL(await res.blob());
+  mediaBlobCache.set(rel, url);
+  return url;
+}
+function hydrateMedia(rootEl) {
+  rootEl.querySelectorAll('[data-media-src]').forEach((el) => {
+    const rel = el.getAttribute('data-media-src');
+    el.removeAttribute('data-media-src');
+    loadMediaBlob(rel).then((url) => {
+      if (!url) return;
+      if (el.tagName === 'A') el.href = url;
+      else el.src = url;
+    }).catch(() => { /* ignore failed fetch */ });
+  });
 }
 
 function fileToBase64(file) {
@@ -584,19 +651,19 @@ function renderMessages() {
     if (m.deleted_at) {
       bodyHtml = '<span class="non-text">🗑️ message deleted</span>';
     } else if (m.media_url) {
-      const url = mediaUrlWithToken(m.media_url);
+      const rel = escapeHtml(m.media_url);
       const caption = m.body ? escapeHtml(m.body).replace(/\n/g, '<br>') : '';
       if (m.type === 'image' || m.type === 'sticker') {
-        bodyHtml = `<img class="media" src="${url}" alt="image" />` + (caption ? `<div style="margin-top:6px">${caption}</div>` : '');
+        bodyHtml = `<img class="media" data-media-src="${rel}" alt="image" />` + (caption ? `<div style="margin-top:6px">${caption}</div>` : '');
       } else if (m.type === 'video') {
-        bodyHtml = `<video class="media" controls src="${url}"></video>` + (caption ? `<div style="margin-top:6px">${caption}</div>` : '');
+        bodyHtml = `<video class="media" controls data-media-src="${rel}"></video>` + (caption ? `<div style="margin-top:6px">${caption}</div>` : '');
       } else if (m.type === 'audio') {
-        bodyHtml = `<audio class="media" controls src="${url}"></audio>`;
+        bodyHtml = `<audio class="media" controls data-media-src="${rel}"></audio>`;
       } else if (m.type === 'document') {
-        const fname = (m.media_url.split('/').pop() || 'file').split('?')[0];
-        bodyHtml = `<div class="doc">📄 <a href="${url}" download="${escapeHtml(fname)}">${escapeHtml(fname)}</a></div>` + (caption ? `<div style="margin-top:6px">${caption}</div>` : '');
+        const fname = (m.media_url.split('/').pop() || 'file');
+        bodyHtml = `<div class="doc">📄 <a data-media-src="${rel}" download="${escapeHtml(fname)}">${escapeHtml(fname)}</a></div>` + (caption ? `<div style="margin-top:6px">${caption}</div>` : '');
       } else {
-        bodyHtml = `<a href="${url}">[${escapeHtml(m.type)}]</a>`;
+        bodyHtml = `<a data-media-src="${rel}">[${escapeHtml(m.type)}]</a>`;
       }
     } else if (m.body) {
       bodyHtml = escapeHtml(m.body).replace(/\n/g, '<br>');
@@ -605,6 +672,9 @@ function renderMessages() {
     }
 
     const ticks = statusTicks(m.direction, m.delivery_status);
+    const readBy = (isOut && isGroup)
+      ? readBySummary(m.receipts, convoCtx?.participant_count)
+      : '';
     const editedTag = m.edited_at ? ' <span class="non-text" style="font-size:10px">(edited)</span>' : '';
 
     const actions = m.deleted_at ? '' : `
@@ -619,9 +689,17 @@ function renderMessages() {
       ${senderLine}
       ${replyLine}
       ${bodyHtml}
-      <div class="meta">${editedTag}${fmtTime(m.ts)}${ticks}</div>
+      <div class="meta">${editedTag}${fmtTime(m.ts)}${ticks}${readBy}</div>
       ${actions}
     `;
+
+    // Click-to-pin the read-by panel (in addition to hover for desktop).
+    b.querySelectorAll('.read-by').forEach((el) => {
+      el.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        el.classList.toggle('open');
+      });
+    });
 
     b.querySelectorAll('button[data-act]').forEach((btn) => {
       btn.addEventListener('click', (ev) => {
@@ -634,6 +712,7 @@ function renderMessages() {
     });
 
     root.appendChild(b);
+    hydrateMedia(b);
 
     // Reactions row
     if (m.reactions?.length) {

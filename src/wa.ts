@@ -14,6 +14,7 @@ import { existsSync, readdirSync, readFileSync, mkdirSync, writeFileSync } from 
 
 import {
   upsertContact,
+  upsertAlias,
   insertMessage,
   upsertChatsBatch,
   updateMessageStatus,
@@ -21,15 +22,22 @@ import {
   markMessageEdited,
   markMessageDeleted,
   upsertReaction,
+  upsertReceipt,
+  getMessageDeliveryStatus,
   setChatProfilePic,
+  setChatParticipantCount,
   setContactProfilePic,
+  setMessageTranscript,
   type Direction,
   type MessageInput,
   type ChatInput,
   type DeliveryStatus,
+  type ReceiptStatus,
   type SentBy,
 } from './db.js'
 import { dispatchInbound } from './webhook.js'
+import { transcribeAudio, TranscribeError } from './transcribe.js'
+import { OPENAI_API_KEY } from './env.js'
 
 export function scanRegisteredSessions(authDir = './auth'): string[] {
   if (!existsSync(authDir)) return []
@@ -210,11 +218,35 @@ async function downloadAndStoreMedia(
       writeFileSync(path, buf)
       updateMessageMedia(`${session}:${msgId}`, path, mime, buf.length)
       log.info({ session, msgId, type, bytes: buf.length, path }, 'media downloaded')
+      if (type === 'audio' && OPENAI_API_KEY) {
+        void transcribeAndStore(session, msgId, path, mime)
+      }
     }
   } catch (err) {
     log.warn(
       { session, msgId, type, err: (err as Error).message },
       'media download failed',
+    )
+  }
+}
+
+async function transcribeAndStore(
+  session: string,
+  msgId: string,
+  path: string,
+  mime: string | null,
+): Promise<void> {
+  try {
+    const text = await transcribeAudio(path, { mime })
+    if (text) {
+      setMessageTranscript(`${session}:${msgId}`, text)
+      log.info({ session, msgId, chars: text.length }, 'audio transcribed')
+    }
+  } catch (err) {
+    const isApi = err instanceof TranscribeError
+    log.warn(
+      { session, msgId, err: (err as Error).message, kind: isApi ? 'api' : 'unknown' },
+      'transcribe failed',
     )
   }
 }
@@ -312,7 +344,9 @@ class WaManager {
         const result = insertMessage(row)
         if (result.changes > 0) {
           log.info(
-            { session: name, dir: row.direction, from: row.from_jid, type: row.type, body: row.body },
+            // Message body intentionally NOT logged — bodies are sensitive and the
+            // log file is plaintext on disk. Length only.
+            { session: name, dir: row.direction, from: row.from_jid, type: row.type, body_len: row.body?.length ?? 0 },
             row.direction === 'in' ? 'inbound' : 'outbound',
           )
           if (row.direction === 'in') dispatchInbound(row)
@@ -349,6 +383,59 @@ class WaManager {
         if (edited) {
           const newBody = getBody(edited) ?? null
           markMessageEdited(fullId, newBody)
+        }
+      }
+    })
+
+    // Per-participant delivery / read receipts (mainly for groups, also
+    // emitted for 1:1 in some Baileys versions). The `receipt` carries
+    // timestamps for delivered / read / played per `userJid`.
+    sock.ev.on('message-receipt.update', (events) => {
+      for (const ev of events) {
+        const id = ev.key?.id
+        const participant = ev.receipt?.userJid
+        if (!id || !participant) continue
+        const fullId = `${name}:${id}`
+
+        const r = ev.receipt
+        const toMs = (v: unknown): number | null => {
+          if (v == null) return null
+          if (typeof v === 'object' && v && 'toNumber' in (v as any)) {
+            const n = (v as any).toNumber()
+            return Number.isFinite(n) && n > 0 ? n * 1000 : null
+          }
+          const n = Number(v)
+          return Number.isFinite(n) && n > 0 ? n * 1000 : null
+        }
+
+        const playedTs = toMs(r.playedTimestamp)
+        const readTs = toMs(r.readTimestamp)
+        const deliveredTs = toMs(r.receiptTimestamp)
+
+        let highest: ReceiptStatus | null = null
+        if (deliveredTs != null) {
+          upsertReceipt({ session: name, message_id: fullId, participant, status: 'delivered', ts: deliveredTs })
+          highest = 'delivered'
+        }
+        if (readTs != null) {
+          upsertReceipt({ session: name, message_id: fullId, participant, status: 'read', ts: readTs })
+          highest = 'read'
+        }
+        if (playedTs != null) {
+          upsertReceipt({ session: name, message_id: fullId, participant, status: 'played', ts: playedTs })
+          highest = 'played'
+        }
+
+        // Bump the aggregate delivery_status — for groups Baileys does not
+        // necessarily emit `messages.update` with status, so this keeps the
+        // 1-line tick in sync with "any participant has reached state Y".
+        if (highest) {
+          const rank: Record<DeliveryStatus, number> = {
+            pending: 0, server: 1, delivered: 2, read: 3, played: 4,
+          }
+          const cur = getMessageDeliveryStatus(fullId)
+          const curRank = cur ? rank[cur] : -1
+          if (rank[highest] > curRank) updateMessageStatus(fullId, highest)
         }
       }
     })
@@ -506,6 +593,7 @@ class WaManager {
 
       let updatedNames = 0
       let upsertedParticipants = 0
+      let aliasesWritten = 0
       const ts = Date.now()
       for (const g of groups) {
         try {
@@ -517,15 +605,43 @@ class WaManager {
             updatedNames++
           }
           if (meta?.participants?.length) {
+            setChatParticipantCount(name, g.jid, meta.participants.length)
             for (const p of meta.participants) {
               if (!p.id) continue
+              const pAny = p as { id: string; lid?: string; jid?: string; name?: string; notify?: string }
+              const pushName = pAny.name ?? pAny.notify ?? null
+              // pAny.id is whatever the group addresses this person as (PN or LID).
+              // pAny.jid (if present) is the PN form, pAny.lid (if present) is the LID form.
+              // Pick canonical = PN form when known; fall back to id.
+              const lidForm = pAny.id.endsWith('@lid') ? pAny.id : pAny.lid ?? null
+              const pnForm = pAny.id.endsWith('@s.whatsapp.net') ? pAny.id : pAny.jid ?? null
+
+              // Always upsert the addressed id so messages from this group can resolve
               upsertContact({
-                jid: p.id,
-                push_name: (p as any).name ?? (p as any).notify ?? null,
-                is_lid: p.id.endsWith('@lid') ? 1 : 0,
+                jid: pAny.id,
+                push_name: pushName,
+                is_lid: pAny.id.endsWith('@lid') ? 1 : 0,
                 ts,
               })
               upsertedParticipants++
+
+              // If we have BOTH forms, mirror the contact and write the alias
+              if (lidForm && pnForm && lidForm !== pnForm) {
+                upsertContact({
+                  jid: lidForm,
+                  push_name: pushName,
+                  is_lid: 1,
+                  ts,
+                })
+                upsertContact({
+                  jid: pnForm,
+                  push_name: pushName,
+                  is_lid: 0,
+                  ts,
+                })
+                upsertAlias(name, lidForm, pnForm)
+                aliasesWritten++
+              }
             }
           }
         } catch {
@@ -534,7 +650,12 @@ class WaManager {
         await new Promise((r) => setTimeout(r, 400))
       }
       log.info(
-        { session: name, updated_names: updatedNames, upserted_participants: upsertedParticipants },
+        {
+          session: name,
+          updated_names: updatedNames,
+          upserted_participants: upsertedParticipants,
+          aliases_written: aliasesWritten,
+        },
         'group metadata done',
       )
     } catch (err) {
@@ -582,7 +703,7 @@ class WaManager {
       media_size: null,
     })
 
-    log.info({ session: name, to: jid, body: text }, 'sent text')
+    log.info({ session: name, to: jid, body_len: text.length }, 'sent text')
     return { id: result.key.id, jid, ts }
   }
 
@@ -731,13 +852,18 @@ class WaManager {
     await sock.readMessages(keys)
   }
 
-  async checkOnWhatsApp(name: string, phone: string): Promise<{ exists: boolean; jid: string | null }> {
+  async checkOnWhatsApp(
+    name: string,
+    phone: string,
+  ): Promise<{ exists: boolean; jid: string | null; lid: string | null }> {
     const sock = this.get(name)
     if (!sock) throw new Error(`session "${name}" not connected`)
     const digits = phone.replace(/[^0-9]/g, '')
     const results = await sock.onWhatsApp(digits)
-    if (!results || results.length === 0) return { exists: false, jid: null }
-    return { exists: !!results[0]?.exists, jid: results[0]?.jid ?? null }
+    if (!results || results.length === 0) return { exists: false, jid: null, lid: null }
+    const r = results[0] as { exists?: unknown; jid?: string; lid?: unknown }
+    const lidVal = typeof r.lid === 'string' ? r.lid : null
+    return { exists: !!r.exists, jid: r.jid ?? null, lid: lidVal }
   }
 
   async groupInfo(name: string, jid: string) {

@@ -9,7 +9,10 @@
     "start": "tsx src/index.ts",
     "pair": "tsx src/index.ts",
     "history": "tsx src/history.ts",
-    "mcp": "tsx src/mcp.ts"
+    "mcp": "tsx src/mcp.ts",
+    "import-contacts": "tsx src/import-contacts.ts",
+    "backup": "tsx src/backup-db.ts",
+    "transcribe-backlog": "tsx src/transcribe-backlog.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
