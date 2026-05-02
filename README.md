@@ -207,4 +207,4 @@ Aliases are per-session.
 
 ## License
 
-Personal use. No warranty.
+[MIT](LICENSE) — do whatever you want with it, just keep the copyright notice. No warranty.
