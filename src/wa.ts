@@ -492,30 +492,51 @@ class WaManager {
       const { db } = await import('./db.js')
       const groups = db
         .prepare(
-          `SELECT jid FROM chats
-           WHERE session = ? AND is_group = 1 AND (name IS NULL OR name = '')`,
+          `SELECT jid, name FROM chats
+           WHERE session = ? AND is_group = 1`,
         )
-        .all(name) as Array<{ jid: string }>
+        .all(name) as Array<{ jid: string; name: string | null }>
 
       if (!groups.length) return
-      log.info({ session: name, count: groups.length }, 'fetching group metadata')
+      const needsName = groups.filter((g) => !g.name)
+      log.info(
+        { session: name, total: groups.length, need_name: needsName.length },
+        'fetching group metadata + participants',
+      )
 
-      let updated = 0
+      let updatedNames = 0
+      let upsertedParticipants = 0
+      const ts = Date.now()
       for (const g of groups) {
         try {
           const meta = await sock.groupMetadata(g.jid)
-          if (meta?.subject) {
+          if (meta?.subject && !g.name) {
             db.prepare(
               `UPDATE chats SET name = ?, updated_at = ? WHERE session = ? AND jid = ?`,
-            ).run(meta.subject, Date.now(), name, g.jid)
-            updated++
+            ).run(meta.subject, ts, name, g.jid)
+            updatedNames++
+          }
+          if (meta?.participants?.length) {
+            for (const p of meta.participants) {
+              if (!p.id) continue
+              upsertContact({
+                jid: p.id,
+                push_name: (p as any).name ?? (p as any).notify ?? null,
+                is_lid: p.id.endsWith('@lid') ? 1 : 0,
+                ts,
+              })
+              upsertedParticipants++
+            }
           }
         } catch {
           /* group may be inaccessible (left, banned, etc.) — skip silently */
         }
         await new Promise((r) => setTimeout(r, 400))
       }
-      log.info({ session: name, updated }, 'group metadata done')
+      log.info(
+        { session: name, updated_names: updatedNames, upserted_participants: upsertedParticipants },
+        'group metadata done',
+      )
     } catch (err) {
       log.warn({ err: (err as Error).message, session: name }, 'group metadata refresh failed')
     }

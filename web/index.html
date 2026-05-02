@@ -559,8 +559,22 @@ function renderMessages() {
     const isOut = m.direction === 'out';
     b.className = 'bubble ' + (isOut ? 'out' : 'in') + (m.deleted_at ? ' deleted' : '');
 
-    const senderLine = (!isOut && m.from_display_name)
-      ? `<div class="sender">${escapeHtml(m.from_display_name)}</div>` : '';
+    // Show sender for any inbound message in a group; for 1-1, show only if we
+    // have a real display name (chat header already names the other party).
+    const convoCtx = state.conversations.find((c) => c.chat_jid === state.currentJid);
+    const isGroup = !!convoCtx?.is_group;
+    let senderLine = '';
+    if (!isOut) {
+      const label = isGroup
+        ? (m.from_label || m.from_display_name || m.from_phone || m.from_jid)
+        : m.from_display_name;
+      if (label) {
+        const phoneTag = (isGroup && m.from_phone && m.from_phone !== label)
+          ? ` <span style="color:var(--muted);font-weight:normal">${escapeHtml(m.from_phone)}</span>`
+          : '';
+        senderLine = `<div class="sender">${escapeHtml(label)}${phoneTag}</div>`;
+      }
+    }
 
     const replyLine = m.quoted
       ? `<div class="reply-quote">${escapeHtml((m.quoted.body_preview || '[message]').slice(0, 120))}</div>`

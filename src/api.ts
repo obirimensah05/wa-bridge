@@ -61,18 +61,31 @@ function enrichConvo(session: string, row: any) {
   }
 }
 
+function shortJid(jid: string): string {
+  // "94279548584018@lid" -> "~94279548584018"
+  // "12025550100:34@s.whatsapp.net" -> "+12025550100"
+  const local = jid.split('@')[0].split(':')[0]
+  if (jid.endsWith('@s.whatsapp.net') && /^\d+$/.test(local)) return `+${local}`
+  if (jid.endsWith('@g.us')) return 'group'
+  return `~${local.slice(0, 12)}`
+}
+
 function enrichMessage(session: string, row: any) {
+  const from_display_name = pushNameFor(session, row.from_jid)
+  const from_phone = phoneFor(session, row.from_jid)
   const reactions = reactionsFor(session, row.id).map((r) => ({
     from_jid: r.from_jid,
     from_display_name: pushNameFor(session, r.from_jid),
+    from_phone: phoneFor(session, r.from_jid),
     emoji: r.emoji,
     ts: r.ts,
   }))
   const quoted = row.quoted_id ? { id: row.quoted_id, body_preview: lookupBody(session, row.quoted_id) } : null
   return {
     ...row,
-    from_display_name: pushNameFor(session, row.from_jid),
-    from_phone: phoneFor(session, row.from_jid),
+    from_display_name,
+    from_phone,
+    from_label: from_display_name ?? from_phone ?? shortJid(row.from_jid),
     chat_phone: phoneFor(session, row.chat_jid),
     media_url: mediaUrl(row.media_path),
     reactions,
