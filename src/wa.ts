@@ -4,19 +4,30 @@ import {
   DisconnectReason,
   fetchLatestBaileysVersion,
   Browsers,
+  downloadMediaMessage,
   type WASocket,
+  type WAMessage,
 } from '@whiskeysockets/baileys'
 import qrcode from 'qrcode-terminal'
 import pino from 'pino'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 
 import {
   upsertContact,
   insertMessage,
   upsertChatsBatch,
+  updateMessageStatus,
+  updateMessageMedia,
+  markMessageEdited,
+  markMessageDeleted,
+  upsertReaction,
+  setChatProfilePic,
+  setContactProfilePic,
   type Direction,
   type MessageInput,
   type ChatInput,
+  type DeliveryStatus,
+  type SentBy,
 } from './db.js'
 import { dispatchInbound } from './webhook.js'
 
@@ -75,6 +86,36 @@ function extractTs(raw: unknown): number {
   return Number.isFinite(n) && n > 0 ? n * 1000 : Date.now()
 }
 
+function getContextInfo(message: any): any {
+  return (
+    message?.extendedTextMessage?.contextInfo ??
+    message?.imageMessage?.contextInfo ??
+    message?.videoMessage?.contextInfo ??
+    message?.audioMessage?.contextInfo ??
+    message?.documentMessage?.contextInfo ??
+    message?.stickerMessage?.contextInfo ??
+    null
+  )
+}
+
+function getMediaInfo(message: any): { mime: string | null; size: number | null } {
+  const m =
+    message?.imageMessage ??
+    message?.videoMessage ??
+    message?.audioMessage ??
+    message?.documentMessage ??
+    message?.stickerMessage
+  if (!m) return { mime: null, size: null }
+  const size = m.fileLength
+  return {
+    mime: m.mimetype ?? null,
+    size:
+      typeof size === 'object' && size && 'toNumber' in size
+        ? (size as any).toNumber()
+        : (typeof size === 'number' ? size : null),
+  }
+}
+
 function toMessageRow(msg: any, session: string, ourJid: string | undefined): MessageInput | null {
   const id = msg?.key?.id
   const remoteJid = msg?.key?.remoteJid
@@ -89,6 +130,10 @@ function toMessageRow(msg: any, session: string, ourJid: string | undefined): Me
     ? (ourJid ?? remoteJid)
     : (isGroup ? (msg.key.participant ?? remoteJid) : remoteJid)
 
+  const ctx = getContextInfo(msg.message)
+  const quotedStanzaId = ctx?.stanzaId ?? null
+  const { mime, size } = getMediaInfo(msg.message)
+
   return {
     id: `${session}:${id}`,
     session,
@@ -100,6 +145,77 @@ function toMessageRow(msg: any, session: string, ourJid: string | undefined): Me
     media_path: null,
     ts: Math.floor(extractTs(msg.messageTimestamp)),
     raw_json: JSON.stringify(msg),
+    sent_by: direction === 'out' ? 'user' : null,
+    delivery_status: null,
+    quoted_id: quotedStanzaId ? `${session}:${quotedStanzaId}` : null,
+    media_mime: mime,
+    media_size: size,
+  }
+}
+
+const STATUS_MAP: Record<number, DeliveryStatus> = {
+  1: 'pending',
+  2: 'server',
+  3: 'delivered',
+  4: 'read',
+  5: 'played',
+}
+
+function mediaExtension(mime: string | null, fallbackType: string): string {
+  if (!mime) {
+    if (fallbackType === 'image') return 'jpg'
+    if (fallbackType === 'video') return 'mp4'
+    if (fallbackType === 'audio') return 'ogg'
+    if (fallbackType === 'sticker') return 'webp'
+    return 'bin'
+  }
+  const m = mime.toLowerCase()
+  if (m.includes('jpeg') || m.includes('jpg')) return 'jpg'
+  if (m.includes('png')) return 'png'
+  if (m.includes('gif')) return 'gif'
+  if (m.includes('webp')) return 'webp'
+  if (m.includes('mp4')) return 'mp4'
+  if (m.includes('mpeg')) return 'mp3'
+  if (m.includes('ogg') || m.includes('opus')) return 'ogg'
+  if (m.includes('wav')) return 'wav'
+  if (m.includes('pdf')) return 'pdf'
+  const slash = m.split('/')[1] ?? ''
+  return slash.split(';')[0] || 'bin'
+}
+
+const MEDIA_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker'])
+
+async function downloadAndStoreMedia(
+  sock: WASocket,
+  msg: WAMessage,
+  session: string,
+  msgId: string,
+  type: string,
+  mime: string | null,
+): Promise<void> {
+  if (!MEDIA_TYPES.has(type)) return
+  try {
+    const dir = `./data/media/${session}`
+    mkdirSync(dir, { recursive: true })
+    const ext = mediaExtension(mime, type)
+    const safeId = msgId.replace(/[^a-zA-Z0-9_-]/g, '_')
+    const path = `${dir}/${safeId}.${ext}`
+    const buf = await downloadMediaMessage(
+      msg,
+      'buffer',
+      {},
+      { logger: pino({ level: 'silent' }) as any, reuploadRequest: sock.updateMediaMessage },
+    )
+    if (buf instanceof Buffer) {
+      writeFileSync(path, buf)
+      updateMessageMedia(`${session}:${msgId}`, path, mime, buf.length)
+      log.info({ session, msgId, type, bytes: buf.length, path }, 'media downloaded')
+    }
+  } catch (err) {
+    log.warn(
+      { session, msgId, type, err: (err as Error).message },
+      'media download failed',
+    )
   }
 }
 
@@ -141,6 +257,7 @@ class WaManager {
 
       if (connection === 'open') {
         log.info({ session: name, jid: sock.user?.id }, 'connected')
+        void this.refreshGroupMetadata(name, sock)
       }
 
       if (connection === 'close') {
@@ -157,6 +274,29 @@ class WaManager {
     sock.ev.on('messages.upsert', ({ messages, type }) => {
       if (type !== 'notify') return
       for (const msg of messages) {
+        // Reaction messages are handled separately — they reference another msg
+        const reaction = msg.message?.reactionMessage
+        if (reaction) {
+          const targetId = reaction.key?.id
+          if (targetId) {
+            const reactorJid = msg.key.fromMe
+              ? (sock.user?.id ?? '')
+              : (msg.key.participant ?? msg.key.remoteJid ?? '')
+            upsertReaction({
+              session: name,
+              message_id: `${name}:${targetId}`,
+              from_jid: reactorJid,
+              emoji: reaction.text ?? '',
+              ts: Math.floor(extractTs(msg.messageTimestamp)),
+            })
+            log.info(
+              { session: name, target: targetId, emoji: reaction.text, from: reactorJid },
+              'reaction',
+            )
+          }
+          continue
+        }
+
         const row = toMessageRow(msg, name, sock.user?.id)
         if (!row) continue
 
@@ -176,7 +316,58 @@ class WaManager {
             row.direction === 'in' ? 'inbound' : 'outbound',
           )
           if (row.direction === 'in') dispatchInbound(row)
+          if (MEDIA_TYPES.has(row.type) && msg.key.id) {
+            void downloadAndStoreMedia(sock, msg, name, msg.key.id, row.type, row.media_mime)
+          }
         }
+      }
+    })
+
+    // Delivery status, edits, deletes
+    sock.ev.on('messages.update', (updates) => {
+      for (const u of updates) {
+        const id = u.key?.id
+        if (!id) continue
+        const fullId = `${name}:${id}`
+
+        // Status update (1=pending, 2=server, 3=delivered, 4=read, 5=played)
+        const newStatus =
+          typeof u.update?.status === 'number' ? STATUS_MAP[u.update.status] : undefined
+        if (newStatus) updateMessageStatus(fullId, newStatus)
+
+        // Deletion via revoke
+        const stub = (u.update as any)?.messageStubType
+        if (stub === 1 || stub === 2) {
+          markMessageDeleted(fullId)
+        }
+
+        // Edit: protocol message indicates an edit; the new content lives in
+        // protocolMessage.editedMessage on inbound. We capture body change here.
+        const edited =
+          (u.update as any)?.message?.editedMessage?.message ??
+          (u.update as any)?.message?.protocolMessage?.editedMessage
+        if (edited) {
+          const newBody = getBody(edited) ?? null
+          markMessageEdited(fullId, newBody)
+        }
+      }
+    })
+
+    // Reaction event (alternate path some Baileys versions use)
+    sock.ev.on('messages.reaction', (reactions) => {
+      for (const r of reactions) {
+        const targetId = r.key?.id
+        if (!targetId) continue
+        const reactorJid = r.key.fromMe
+          ? (sock.user?.id ?? '')
+          : (r.key.participant ?? r.key.remoteJid ?? '')
+        upsertReaction({
+          session: name,
+          message_id: `${name}:${targetId}`,
+          from_jid: reactorJid,
+          emoji: r.reaction?.text ?? '',
+          ts: Date.now(),
+        })
       }
     })
 
@@ -296,12 +487,59 @@ class WaManager {
     return Array.from(this.sessions.keys())
   }
 
-  async sendText(name: string, to: string, text: string): Promise<{ id: string; jid: string; ts: number }> {
+  private async refreshGroupMetadata(name: string, sock: WASocket): Promise<void> {
+    try {
+      const { db } = await import('./db.js')
+      const groups = db
+        .prepare(
+          `SELECT jid FROM chats
+           WHERE session = ? AND is_group = 1 AND (name IS NULL OR name = '')`,
+        )
+        .all(name) as Array<{ jid: string }>
+
+      if (!groups.length) return
+      log.info({ session: name, count: groups.length }, 'fetching group metadata')
+
+      let updated = 0
+      for (const g of groups) {
+        try {
+          const meta = await sock.groupMetadata(g.jid)
+          if (meta?.subject) {
+            db.prepare(
+              `UPDATE chats SET name = ?, updated_at = ? WHERE session = ? AND jid = ?`,
+            ).run(meta.subject, Date.now(), name, g.jid)
+            updated++
+          }
+        } catch {
+          /* group may be inaccessible (left, banned, etc.) — skip silently */
+        }
+        await new Promise((r) => setTimeout(r, 400))
+      }
+      log.info({ session: name, updated }, 'group metadata done')
+    } catch (err) {
+      log.warn({ err: (err as Error).message, session: name }, 'group metadata refresh failed')
+    }
+  }
+
+  async sendText(
+    name: string,
+    to: string,
+    text: string,
+    opts: { quoted_id?: string; sent_by?: SentBy } = {},
+  ): Promise<{ id: string; jid: string; ts: number }> {
     const sock = this.get(name)
     if (!sock) throw new Error(`session "${name}" not connected`)
 
     const jid = normalizeJid(to)
-    const result = await sock.sendMessage(jid, { text })
+    const sendOpts: any = {}
+    if (opts.quoted_id) {
+      const stanzaId = opts.quoted_id.startsWith(`${name}:`)
+        ? opts.quoted_id.slice(name.length + 1)
+        : opts.quoted_id
+      sendOpts.quoted = { key: { remoteJid: jid, id: stanzaId, fromMe: false }, message: {} }
+    }
+
+    const result = await sock.sendMessage(jid, { text }, sendOpts)
     if (!result?.key?.id) throw new Error('send failed: no message id returned')
 
     const ts = Date.now()
@@ -316,10 +554,213 @@ class WaManager {
       media_path: null,
       ts,
       raw_json: JSON.stringify(result),
+      sent_by: opts.sent_by ?? 'api',
+      delivery_status: 'pending',
+      quoted_id: opts.quoted_id ?? null,
+      media_mime: null,
+      media_size: null,
     })
 
-    log.info({ session: name, to: jid, body: text }, 'sent')
+    log.info({ session: name, to: jid, body: text }, 'sent text')
     return { id: result.key.id, jid, ts }
+  }
+
+  async sendMedia(
+    name: string,
+    to: string,
+    media: { kind: 'image' | 'video' | 'audio' | 'document'; data: Buffer; mime?: string; filename?: string },
+    opts: { caption?: string; quoted_id?: string; sent_by?: SentBy } = {},
+  ): Promise<{ id: string; jid: string; ts: number }> {
+    const sock = this.get(name)
+    if (!sock) throw new Error(`session "${name}" not connected`)
+
+    const jid = normalizeJid(to)
+    const payload: any = {}
+    if (media.kind === 'image') payload.image = media.data
+    else if (media.kind === 'video') payload.video = media.data
+    else if (media.kind === 'audio') {
+      payload.audio = media.data
+      payload.mimetype = media.mime ?? 'audio/ogg; codecs=opus'
+      payload.ptt = false
+    } else if (media.kind === 'document') {
+      payload.document = media.data
+      payload.fileName = media.filename ?? 'file'
+      if (media.mime) payload.mimetype = media.mime
+    }
+    if (opts.caption && (media.kind === 'image' || media.kind === 'video' || media.kind === 'document')) {
+      payload.caption = opts.caption
+    }
+    if (media.mime && (media.kind === 'image' || media.kind === 'video')) payload.mimetype = media.mime
+
+    const sendOpts: any = {}
+    if (opts.quoted_id) {
+      const stanzaId = opts.quoted_id.startsWith(`${name}:`)
+        ? opts.quoted_id.slice(name.length + 1)
+        : opts.quoted_id
+      sendOpts.quoted = { key: { remoteJid: jid, id: stanzaId, fromMe: false }, message: {} }
+    }
+
+    const result = await sock.sendMessage(jid, payload, sendOpts)
+    if (!result?.key?.id) throw new Error('send failed: no message id returned')
+
+    const ts = Date.now()
+    // Persist locally so the UI sees it immediately (also eventually echoed by upsert)
+    const dir = `./data/media/${name}`
+    mkdirSync(dir, { recursive: true })
+    const safeId = result.key.id.replace(/[^a-zA-Z0-9_-]/g, '_')
+    const ext = mediaExtension(media.mime ?? null, media.kind)
+    const path = `${dir}/${safeId}.${ext}`
+    try {
+      writeFileSync(path, media.data)
+    } catch {
+      /* non-fatal */
+    }
+
+    insertMessage({
+      id: `${name}:${result.key.id}`,
+      session: name,
+      chat_jid: jid,
+      from_jid: sock.user?.id ?? 'unknown',
+      direction: 'out',
+      type: media.kind,
+      body: opts.caption ?? null,
+      media_path: path,
+      ts,
+      raw_json: JSON.stringify(result),
+      sent_by: opts.sent_by ?? 'api',
+      delivery_status: 'pending',
+      quoted_id: opts.quoted_id ?? null,
+      media_mime: media.mime ?? null,
+      media_size: media.data.length,
+    })
+
+    log.info(
+      { session: name, to: jid, kind: media.kind, bytes: media.data.length },
+      'sent media',
+    )
+    return { id: result.key.id, jid, ts }
+  }
+
+  async sendReaction(
+    name: string,
+    targetMessageId: string,
+    targetChatJid: string,
+    emoji: string,
+  ): Promise<{ ok: true }> {
+    const sock = this.get(name)
+    if (!sock) throw new Error(`session "${name}" not connected`)
+    const stanzaId = targetMessageId.startsWith(`${name}:`)
+      ? targetMessageId.slice(name.length + 1)
+      : targetMessageId
+    await sock.sendMessage(targetChatJid, {
+      react: { text: emoji, key: { remoteJid: targetChatJid, id: stanzaId, fromMe: false } },
+    })
+    upsertReaction({
+      session: name,
+      message_id: `${name}:${stanzaId}`,
+      from_jid: sock.user?.id ?? '',
+      emoji,
+      ts: Date.now(),
+    })
+    return { ok: true }
+  }
+
+  async deleteMessage(
+    name: string,
+    targetMessageId: string,
+    targetChatJid: string,
+    targetFromMe = true,
+    targetParticipant?: string,
+  ): Promise<{ ok: true }> {
+    const sock = this.get(name)
+    if (!sock) throw new Error(`session "${name}" not connected`)
+    const stanzaId = targetMessageId.startsWith(`${name}:`)
+      ? targetMessageId.slice(name.length + 1)
+      : targetMessageId
+    await sock.sendMessage(targetChatJid, {
+      delete: {
+        remoteJid: targetChatJid,
+        id: stanzaId,
+        fromMe: targetFromMe,
+        participant: targetParticipant,
+      },
+    })
+    markMessageDeleted(`${name}:${stanzaId}`)
+    return { ok: true }
+  }
+
+  async sendPresence(
+    name: string,
+    jid: string,
+    state: 'composing' | 'paused' | 'recording' | 'available' | 'unavailable',
+  ): Promise<void> {
+    const sock = this.get(name)
+    if (!sock) throw new Error(`session "${name}" not connected`)
+    await sock.sendPresenceUpdate(state, normalizeJid(jid))
+  }
+
+  async markRead(name: string, jid: string, messageIds: string[]): Promise<void> {
+    const sock = this.get(name)
+    if (!sock) throw new Error(`session "${name}" not connected`)
+    const keys = messageIds.map((id) => ({
+      remoteJid: normalizeJid(jid),
+      id: id.startsWith(`${name}:`) ? id.slice(name.length + 1) : id,
+      fromMe: false,
+    }))
+    await sock.readMessages(keys)
+  }
+
+  async checkOnWhatsApp(name: string, phone: string): Promise<{ exists: boolean; jid: string | null }> {
+    const sock = this.get(name)
+    if (!sock) throw new Error(`session "${name}" not connected`)
+    const digits = phone.replace(/[^0-9]/g, '')
+    const results = await sock.onWhatsApp(digits)
+    if (!results || results.length === 0) return { exists: false, jid: null }
+    return { exists: !!results[0]?.exists, jid: results[0]?.jid ?? null }
+  }
+
+  async groupInfo(name: string, jid: string) {
+    const sock = this.get(name)
+    if (!sock) throw new Error(`session "${name}" not connected`)
+    return sock.groupMetadata(jid)
+  }
+
+  async groupInviteLink(name: string, jid: string): Promise<string> {
+    const sock = this.get(name)
+    if (!sock) throw new Error(`session "${name}" not connected`)
+    return sock.groupInviteCode(jid).then((code) => `https://chat.whatsapp.com/${code}`)
+  }
+
+  async groupLeave(name: string, jid: string): Promise<void> {
+    const sock = this.get(name)
+    if (!sock) throw new Error(`session "${name}" not connected`)
+    await sock.groupLeave(jid)
+  }
+
+  async groupParticipants(
+    name: string,
+    jid: string,
+    participants: string[],
+    action: 'add' | 'remove' | 'promote' | 'demote',
+  ) {
+    const sock = this.get(name)
+    if (!sock) throw new Error(`session "${name}" not connected`)
+    return sock.groupParticipantsUpdate(jid, participants, action)
+  }
+
+  async fetchProfilePicture(name: string, jid: string): Promise<string | null> {
+    const sock = this.get(name)
+    if (!sock) return null
+    try {
+      const url = await sock.profilePictureUrl(jid, 'image')
+      if (url) {
+        if (jid.endsWith('@g.us')) setChatProfilePic(name, jid, url)
+        else setContactProfilePic(jid, url)
+      }
+      return url ?? null
+    } catch {
+      return null
+    }
   }
 }
 

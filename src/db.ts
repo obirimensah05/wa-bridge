@@ -66,7 +66,35 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_chats_session_last_ts
     ON chats(session, last_msg_ts DESC);
+
+  CREATE TABLE IF NOT EXISTS reactions (
+    session     TEXT NOT NULL,
+    message_id  TEXT NOT NULL,
+    from_jid    TEXT NOT NULL,
+    emoji       TEXT NOT NULL,
+    ts          INTEGER NOT NULL,
+    PRIMARY KEY (session, message_id, from_jid)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_reactions_message
+    ON reactions(session, message_id);
 `)
+
+// Idempotent column migrations for messages and chats
+const migrations = [
+  `ALTER TABLE messages ADD COLUMN sent_by TEXT`,
+  `ALTER TABLE messages ADD COLUMN delivery_status TEXT`,
+  `ALTER TABLE messages ADD COLUMN quoted_id TEXT`,
+  `ALTER TABLE messages ADD COLUMN edited_at INTEGER`,
+  `ALTER TABLE messages ADD COLUMN deleted_at INTEGER`,
+  `ALTER TABLE messages ADD COLUMN media_mime TEXT`,
+  `ALTER TABLE messages ADD COLUMN media_size INTEGER`,
+  `ALTER TABLE chats ADD COLUMN profile_pic_url TEXT`,
+  `ALTER TABLE contacts ADD COLUMN profile_pic_url TEXT`,
+]
+for (const sql of migrations) {
+  try { db.exec(sql) } catch { /* column already exists */ }
+}
 
 const upsertContactStmt = db.prepare(`
   INSERT INTO contacts (jid, push_name, is_lid, first_seen, last_seen)
@@ -78,9 +106,11 @@ const upsertContactStmt = db.prepare(`
 
 const insertMessageStmt = db.prepare(`
   INSERT OR IGNORE INTO messages
-    (id, session, chat_jid, from_jid, direction, type, body, media_path, ts, raw_json)
+    (id, session, chat_jid, from_jid, direction, type, body, media_path,
+     ts, raw_json, sent_by, delivery_status, quoted_id, media_mime, media_size)
   VALUES
-    (@id, @session, @chat_jid, @from_jid, @direction, @type, @body, @media_path, @ts, @raw_json)
+    (@id, @session, @chat_jid, @from_jid, @direction, @type, @body, @media_path,
+     @ts, @raw_json, @sent_by, @delivery_status, @quoted_id, @media_mime, @media_size)
 `)
 
 const upsertAliasStmt = db.prepare(`
@@ -141,6 +171,9 @@ export interface ContactInput {
   ts: number
 }
 
+export type SentBy = 'user' | 'agent' | 'api' | 'unknown'
+export type DeliveryStatus = 'pending' | 'server' | 'delivered' | 'read' | 'played'
+
 export interface MessageInput {
   id: string
   session: string
@@ -152,6 +185,11 @@ export interface MessageInput {
   media_path: string | null
   ts: number
   raw_json: string | null
+  sent_by: SentBy | null
+  delivery_status: DeliveryStatus | null
+  quoted_id: string | null
+  media_mime: string | null
+  media_size: number | null
 }
 
 export function upsertContact(c: ContactInput): void {
@@ -180,6 +218,93 @@ export function upsertChatsBatch(chats: ChatInput[]): void {
     for (const c of rows) upsertChat(c)
   })
   tx(chats)
+}
+
+const updateMessageStatusStmt = db.prepare(`
+  UPDATE messages SET delivery_status = ? WHERE id = ?
+`)
+const updateMessageMediaStmt = db.prepare(`
+  UPDATE messages SET media_path = ?, media_mime = ?, media_size = ? WHERE id = ?
+`)
+const updateMessageEditedStmt = db.prepare(`
+  UPDATE messages SET body = ?, edited_at = ? WHERE id = ?
+`)
+const updateMessageDeletedStmt = db.prepare(`
+  UPDATE messages SET deleted_at = ? WHERE id = ?
+`)
+const upsertReactionStmt = db.prepare(`
+  INSERT INTO reactions (session, message_id, from_jid, emoji, ts)
+  VALUES (@session, @message_id, @from_jid, @emoji, @ts)
+  ON CONFLICT(session, message_id, from_jid) DO UPDATE SET
+    emoji = excluded.emoji,
+    ts    = excluded.ts
+`)
+const deleteReactionStmt = db.prepare(`
+  DELETE FROM reactions WHERE session = ? AND message_id = ? AND from_jid = ?
+`)
+const reactionsForStmt = db.prepare(`
+  SELECT from_jid, emoji, ts FROM reactions
+  WHERE session = ? AND message_id = ?
+  ORDER BY ts ASC
+`)
+const updateChatPicStmt = db.prepare(`
+  UPDATE chats SET profile_pic_url = ?, updated_at = ? WHERE session = ? AND jid = ?
+`)
+const updateContactPicStmt = db.prepare(`
+  UPDATE contacts SET profile_pic_url = ?, last_seen = ? WHERE jid = ?
+`)
+
+export function updateMessageStatus(id: string, status: DeliveryStatus): void {
+  updateMessageStatusStmt.run(status, id)
+}
+
+export function updateMessageMedia(
+  id: string,
+  mediaPath: string,
+  mime: string | null,
+  size: number | null,
+): void {
+  updateMessageMediaStmt.run(mediaPath, mime, size, id)
+}
+
+export function markMessageEdited(id: string, newBody: string | null): void {
+  updateMessageEditedStmt.run(newBody, Date.now(), id)
+}
+
+export function markMessageDeleted(id: string): void {
+  updateMessageDeletedStmt.run(Date.now(), id)
+}
+
+export interface ReactionInput {
+  session: string
+  message_id: string
+  from_jid: string
+  emoji: string
+  ts: number
+}
+
+export function upsertReaction(r: ReactionInput): void {
+  if (r.emoji === '') {
+    deleteReactionStmt.run(r.session, r.message_id, r.from_jid)
+    return
+  }
+  upsertReactionStmt.run(r)
+}
+
+export function reactionsFor(session: string, messageId: string) {
+  return reactionsForStmt.all(session, messageId) as Array<{
+    from_jid: string
+    emoji: string
+    ts: number
+  }>
+}
+
+export function setChatProfilePic(session: string, jid: string, url: string | null): void {
+  updateChatPicStmt.run(url, Date.now(), session, jid)
+}
+
+export function setContactProfilePic(jid: string, url: string | null): void {
+  updateContactPicStmt.run(url, Date.now(), jid)
 }
 
 export function insertMessage(m: MessageInput): { changes: number } {
@@ -295,6 +420,7 @@ export function listConversations(session: string, limit = 100) {
          COALESCE(cc.pinned, 0)                   AS pinned,
          cc.unread_count,
          co.push_name,
+         COALESCE(co.profile_pic_url, ch_pic.profile_pic_url) AS profile_pic_url,
          lm.body                                  AS last_body,
          lm.direction                             AS last_direction,
          lm.type                                  AS last_type,
@@ -306,6 +432,8 @@ export function listConversations(session: string, limit = 100) {
          ON cc.canonical_jid = j.canonical_jid
        LEFT JOIN contacts co
          ON co.jid = j.canonical_jid
+       LEFT JOIN chats ch_pic
+         ON ch_pic.session = @session AND ch_pic.jid = j.canonical_jid
        WHERE COALESCE(lm.ts, cc.last_msg_ts) IS NOT NULL
        ORDER BY COALESCE(lm.ts, cc.last_msg_ts) DESC
        LIMIT @limit`,
@@ -318,6 +446,7 @@ export function listConversations(session: string, limit = 100) {
       pinned: number
       unread_count: number | null
       push_name: string | null
+      profile_pic_url: string | null
       last_body: string | null
       last_direction: Direction | null
       last_type: string | null
@@ -334,7 +463,9 @@ export function listMessages(
   const jids = expandJidGroup(session, chatJid)
   const placeholders = jids.map(() => '?').join(',')
   const sql = `
-    SELECT id, ts, direction, from_jid, chat_jid, type, body
+    SELECT id, ts, direction, from_jid, chat_jid, type, body,
+           media_path, media_mime, media_size,
+           sent_by, delivery_status, quoted_id, edited_at, deleted_at
     FROM messages
     WHERE session = ?
       AND chat_jid IN (${placeholders})
@@ -356,5 +487,13 @@ export function listMessages(
     chat_jid: string
     type: string
     body: string | null
+    media_path: string | null
+    media_mime: string | null
+    media_size: number | null
+    sent_by: SentBy | null
+    delivery_status: DeliveryStatus | null
+    quoted_id: string | null
+    edited_at: number | null
+    deleted_at: number | null
   }>
 }

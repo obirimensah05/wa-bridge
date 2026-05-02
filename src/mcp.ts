@@ -150,6 +150,148 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['alias'],
       },
     },
+    {
+      name: 'send_media',
+      description:
+        'Send a media message (image, video, audio, or document). Supply the file via either media_url (server fetches it) or media_base64. Confirm with the user before sending.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          to: { type: 'string', description: 'Recipient JID or phone number.' },
+          media_kind: { type: 'string', enum: ['image', 'video', 'audio', 'document'] },
+          media_url: { type: 'string', description: 'Public URL for the server to fetch.' },
+          media_base64: { type: 'string', description: 'Base64-encoded file bytes (no data: prefix).' },
+          mime: { type: 'string', description: 'MIME type. Auto-detected when fetching by URL.' },
+          filename: { type: 'string', description: 'For documents only; the original file name.' },
+          caption: { type: 'string', description: 'Optional caption for image/video/document.' },
+          quoted_id: { type: 'string', description: 'Reply to this message id.' },
+          session: { type: 'string', description: 'Session name. Default: "main".' },
+        },
+        required: ['to', 'media_kind'],
+      },
+    },
+    {
+      name: 'send_reaction',
+      description:
+        'React to a message with a single emoji. Pass an empty string for emoji to remove an existing reaction.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_jid: { type: 'string', description: 'JID of the chat the message is in.' },
+          message_id: { type: 'string', description: 'Full message id ("<session>:<msg_key_id>" or just msg_key_id).' },
+          emoji: { type: 'string', description: 'A single emoji, or empty string to remove.' },
+          session: { type: 'string', description: 'Session name. Default: "main".' },
+        },
+        required: ['chat_jid', 'message_id', 'emoji'],
+      },
+    },
+    {
+      name: 'delete_message',
+      description:
+        'Delete (un-send) a previously sent message. Defaults to from_me=true (only your own messages).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_jid: { type: 'string' },
+          message_id: { type: 'string' },
+          from_me: { type: 'boolean', description: 'Default true.' },
+          participant: { type: 'string', description: 'Group: original sender JID; required only if deleting someone else\'s message as admin.' },
+          session: { type: 'string' },
+        },
+        required: ['chat_jid', 'message_id'],
+      },
+    },
+    {
+      name: 'send_typing',
+      description:
+        'Send a presence indicator. State "composing" shows typing, "paused" stops it, "recording" shows recording voice, "available"/"unavailable" set general presence.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          jid: { type: 'string' },
+          state: { type: 'string', enum: ['composing', 'paused', 'recording', 'available', 'unavailable'] },
+          session: { type: 'string' },
+        },
+        required: ['jid'],
+      },
+    },
+    {
+      name: 'mark_read',
+      description: 'Mark a list of inbound messages as read on the WhatsApp side (sender sees blue ticks).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          jid: { type: 'string', description: 'Chat JID the messages are in.' },
+          message_ids: { type: 'array', items: { type: 'string' }, description: 'Message ids to mark.' },
+          session: { type: 'string' },
+        },
+        required: ['jid', 'message_ids'],
+      },
+    },
+    {
+      name: 'check_number',
+      description:
+        'Check whether a phone number is registered on WhatsApp. Returns the WhatsApp JID if it exists.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          phone: { type: 'string', description: 'Phone number, digits only or with "+" — both accepted.' },
+          session: { type: 'string' },
+        },
+        required: ['phone'],
+      },
+    },
+    {
+      name: 'group_info',
+      description: 'Fetch group metadata (name, description, participants).',
+      inputSchema: {
+        type: 'object',
+        properties: { jid: { type: 'string' }, session: { type: 'string' } },
+        required: ['jid'],
+      },
+    },
+    {
+      name: 'group_invite_link',
+      description: 'Generate a https://chat.whatsapp.com/... invite link for a group.',
+      inputSchema: {
+        type: 'object',
+        properties: { jid: { type: 'string' }, session: { type: 'string' } },
+        required: ['jid'],
+      },
+    },
+    {
+      name: 'group_leave',
+      description: 'Leave a group. Cannot be undone without an invite link.',
+      inputSchema: {
+        type: 'object',
+        properties: { jid: { type: 'string' }, session: { type: 'string' } },
+        required: ['jid'],
+      },
+    },
+    {
+      name: 'group_participants',
+      description:
+        'Add, remove, promote, or demote group participants. Only works if the session is a group admin (for add/remove/promote/demote).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          jid: { type: 'string' },
+          participants: { type: 'array', items: { type: 'string' } },
+          action: { type: 'string', enum: ['add', 'remove', 'promote', 'demote'] },
+          session: { type: 'string' },
+        },
+        required: ['jid', 'participants', 'action'],
+      },
+    },
+    {
+      name: 'refresh_profile_pic',
+      description: 'Fetch the current profile picture URL for a JID and persist it.',
+      inputSchema: {
+        type: 'object',
+        properties: { jid: { type: 'string' }, session: { type: 'string' } },
+        required: ['jid'],
+      },
+    },
   ],
 }))
 
@@ -229,6 +371,116 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const data = await api<unknown>('/v1/aliases', {
         method: 'DELETE',
         body: JSON.stringify({ session, alias }),
+      })
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    }
+
+    if (name === 'send_media') {
+      const to = String(args.to ?? '')
+      const media_kind = args.media_kind as string
+      if (!to || !media_kind) throw new Error('to and media_kind are required')
+      const body = {
+        session, to, media_kind,
+        media_url: args.media_url, media_base64: args.media_base64,
+        mime: args.mime, filename: args.filename,
+        caption: args.caption, quoted_id: args.quoted_id,
+      }
+      const data = await api<unknown>('/v1/send', { method: 'POST', body: JSON.stringify(body) })
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    }
+
+    if (name === 'send_reaction') {
+      const data = await api<unknown>('/v1/react', {
+        method: 'POST',
+        body: JSON.stringify({
+          session,
+          chat_jid: args.chat_jid,
+          message_id: args.message_id,
+          emoji: args.emoji,
+        }),
+      })
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    }
+
+    if (name === 'delete_message') {
+      const data = await api<unknown>('/v1/messages', {
+        method: 'DELETE',
+        body: JSON.stringify({
+          session,
+          chat_jid: args.chat_jid,
+          message_id: args.message_id,
+          from_me: args.from_me ?? true,
+          participant: args.participant,
+        }),
+      })
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    }
+
+    if (name === 'send_typing') {
+      const data = await api<unknown>('/v1/typing', {
+        method: 'POST',
+        body: JSON.stringify({ session, jid: args.jid, state: args.state ?? 'composing' }),
+      })
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    }
+
+    if (name === 'mark_read') {
+      const data = await api<unknown>('/v1/read', {
+        method: 'POST',
+        body: JSON.stringify({ session, jid: args.jid, message_ids: args.message_ids }),
+      })
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    }
+
+    if (name === 'check_number') {
+      const phone = encodeURIComponent(String(args.phone ?? ''))
+      const data = await api<unknown>(
+        `/v1/check?session=${encodeURIComponent(session)}&phone=${phone}`,
+      )
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    }
+
+    if (name === 'group_info') {
+      const jid = encodeURIComponent(String(args.jid ?? ''))
+      const data = await api<unknown>(
+        `/v1/groups/info?session=${encodeURIComponent(session)}&jid=${jid}`,
+      )
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    }
+
+    if (name === 'group_invite_link') {
+      const jid = encodeURIComponent(String(args.jid ?? ''))
+      const data = await api<unknown>(
+        `/v1/groups/invite?session=${encodeURIComponent(session)}&jid=${jid}`,
+      )
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    }
+
+    if (name === 'group_leave') {
+      const data = await api<unknown>('/v1/groups/leave', {
+        method: 'POST',
+        body: JSON.stringify({ session, jid: args.jid }),
+      })
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    }
+
+    if (name === 'group_participants') {
+      const data = await api<unknown>('/v1/groups/participants', {
+        method: 'POST',
+        body: JSON.stringify({
+          session,
+          jid: args.jid,
+          participants: args.participants,
+          action: args.action,
+        }),
+      })
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    }
+
+    if (name === 'refresh_profile_pic') {
+      const data = await api<unknown>('/v1/profile_pic/refresh', {
+        method: 'POST',
+        body: JSON.stringify({ session, jid: args.jid }),
       })
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
     }

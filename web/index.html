@@ -72,16 +72,22 @@
     border-radius: 3px; flex-shrink: 0; }
   .convo .last { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; margin-top: 2px; }
+  .convo .phone { color: var(--accent); font-size: 11px; opacity: 0.75; margin-top: 1px;
+    font-family: ui-monospace, monospace; }
   .convo .ts { color: var(--muted); font-size: 11px; flex-shrink: 0; }
   .convo .badge { background: var(--accent); color: #0e1014; border-radius: 10px; padding: 1px 7px;
     font-size: 11px; font-weight: 700; margin-left: auto; }
 
-  section.chat { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); }
+  section.chat { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg);
+    overflow: hidden; }
+  #chat-pane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  #chat-pane.placeholder { align-items: center; justify-content: center; color: var(--muted); }
   .chat-header { padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
-    display: flex; align-items: center; gap: 12px; }
+    display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
   .chat-header .name { font-weight: 600; }
   .chat-header .sub { color: var(--muted); font-size: 12px; }
-  .messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 6px; }
+  .messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 6px;
+    min-height: 0; }
   .messages .empty { margin: auto; color: var(--muted); }
   .bubble { max-width: 70%; padding: 8px 12px; border-radius: 12px; word-wrap: break-word;
     white-space: pre-wrap; }
@@ -92,9 +98,46 @@
   .day-divider { align-self: center; background: #1a1f2a; color: var(--muted); padding: 2px 10px;
     border-radius: 10px; font-size: 11px; margin: 8px 0; }
   .non-text { color: var(--muted); font-style: italic; }
+  .bubble img.media { max-width: 100%; border-radius: 8px; display: block; cursor: pointer; }
+  .bubble video.media, .bubble audio.media { max-width: 100%; border-radius: 8px; display: block; }
+  .bubble .doc { display: flex; align-items: center; gap: 8px; padding: 6px 4px; }
+  .bubble .doc a { color: var(--text); text-decoration: underline; }
+  .bubble .reply-quote { background: rgba(255,255,255,0.06); border-left: 3px solid var(--accent);
+    padding: 6px 8px; margin-bottom: 6px; border-radius: 4px; font-size: 12px; color: var(--muted); }
+  .bubble.deleted { opacity: 0.55; font-style: italic; }
+  .bubble .ticks { display: inline-block; margin-left: 4px; color: var(--muted); font-size: 11px; }
+  .bubble .ticks.read { color: #34b7f1; }
+  .bubble .actions { position: absolute; top: 4px; right: 6px; display: none; gap: 4px;
+    background: rgba(0,0,0,0.5); border-radius: 6px; padding: 2px 4px; }
+  .bubble:hover .actions { display: flex; }
+  .bubble .actions button { background: none; border: none; color: var(--text); cursor: pointer;
+    font-size: 13px; padding: 2px 4px; }
+  .bubble { position: relative; }
+  .reactions-row { display: flex; flex-wrap: wrap; gap: 4px; align-self: flex-start; margin-top: -4px;
+    margin-bottom: 4px; padding-left: 4px; }
+  .reactions-row.out { align-self: flex-end; padding-right: 4px; padding-left: 0; }
+  .reaction-pill { background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px;
+    padding: 1px 7px; font-size: 12px; cursor: pointer; }
+  .compose .attach-btn, .compose .react-cancel { background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 50%; width: 40px; height: 40px; flex-shrink: 0;
+    cursor: pointer; }
+  .reply-preview { display: none; padding: 8px 12px; background: var(--panel-2);
+    border-bottom: 1px solid var(--border); align-items: center; gap: 8px; }
+  .reply-preview.visible { display: flex; }
+  .reply-preview .body { flex: 1; font-size: 12px; color: var(--muted); overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .reply-preview .clear { background: none; border: none; color: var(--muted); cursor: pointer; }
+  .emoji-picker { position: absolute; bottom: 100%; right: 0; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px; display: none; gap: 4px;
+    z-index: 10; }
+  .emoji-picker.visible { display: flex; }
+  .emoji-picker button { background: none; border: none; font-size: 18px; cursor: pointer;
+    padding: 4px 6px; }
+  .emoji-picker button:hover { background: var(--panel-2); border-radius: 4px; }
+  .avatar img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
 
   .compose { padding: 10px 12px; background: var(--panel); border-top: 1px solid var(--border);
-    display: flex; gap: 8px; }
+    display: flex; gap: 8px; flex-shrink: 0; }
   .compose textarea { flex: 1; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border);
     border-radius: 18px; color: var(--text); resize: none; max-height: 120px; min-height: 40px; line-height: 1.4; }
   .compose button { background: var(--accent); color: #0e1014; border: none; border-radius: 50%;
@@ -148,7 +191,18 @@ const state = {
   currentJid: null,
   messages: [],
   search: '',
+  replyTo: null, // { id, body }
 };
+
+const REACTION_SET = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥'];
+
+function statusTicks(direction, status) {
+  if (direction !== 'out') return '';
+  if (status === 'read' || status === 'played') return '<span class="ticks read">✓✓</span>';
+  if (status === 'delivered') return '<span class="ticks">✓✓</span>';
+  if (status === 'server' || status === 'pending') return '<span class="ticks">✓</span>';
+  return '';
+}
 
 // ---------- API ----------
 async function api(path, init = {}) {
@@ -172,8 +226,52 @@ async function getConversations(session) {
 async function getMessages(session, jid) {
   return api(`/v1/messages?session=${encodeURIComponent(session)}&jid=${encodeURIComponent(jid)}&limit=100`);
 }
-async function sendMessage(session, to, text) {
-  return api('/v1/send', { method: 'POST', body: JSON.stringify({ session, to, text }) });
+async function sendMessage(session, to, text, opts = {}) {
+  const body = { session, to, text, ...opts };
+  return api('/v1/send', { method: 'POST', body: JSON.stringify(body) });
+}
+async function sendMediaCall(session, to, base64, kind, mime, filename, caption, quoted_id) {
+  return api('/v1/send', {
+    method: 'POST',
+    body: JSON.stringify({
+      session, to, media_base64: base64, media_kind: kind, mime, filename, caption, quoted_id,
+    }),
+  });
+}
+async function reactCall(session, chat_jid, message_id, emoji) {
+  return api('/v1/react', { method: 'POST', body: JSON.stringify({ session, chat_jid, message_id, emoji }) });
+}
+async function deleteMessageCall(session, chat_jid, message_id) {
+  return api('/v1/messages', { method: 'DELETE', body: JSON.stringify({ session, chat_jid, message_id }) });
+}
+async function markReadCall(session, jid, ids) {
+  return api('/v1/read', { method: 'POST', body: JSON.stringify({ session, jid, message_ids: ids }) });
+}
+
+function mediaUrlWithToken(rel) {
+  if (!rel) return null;
+  return `${rel}?token=${encodeURIComponent(state.token)}`;
+}
+
+function fileToBase64(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const result = String(r.result);
+      const base64 = result.includes(',') ? result.split(',', 2)[1] : result;
+      res(base64);
+    };
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+}
+
+function fileKind(mime) {
+  if (!mime) return 'document';
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  return 'document';
 }
 
 // ---------- Auth ----------
@@ -265,10 +363,16 @@ function renderConversations() {
     const el = document.createElement('div');
     el.className = 'convo' + (c.chat_jid === state.currentJid ? ' active' : '');
     const lastBody = c.last_body || (c.last_type ? `[${c.last_type}]` : '');
+    const phoneLine = c.phone ? `<div class="phone">${escapeHtml(c.phone)}</div>` : '';
+    const picUrl = c.profile_pic_url
+      ? `<img src="${escapeHtml(c.profile_pic_url)}" alt="" onerror="this.remove()">`
+      : '';
+    const avatarInner = picUrl || (c.is_group ? '#' : escapeHtml(initials(name)));
     el.innerHTML = `
-      <div class="avatar ${c.is_group ? 'group' : ''}">${c.is_group ? '#' : escapeHtml(initials(name))}</div>
+      <div class="avatar ${c.is_group ? 'group' : ''}">${avatarInner}</div>
       <div class="meta">
         <div class="name">${escapeHtml(name)}${c.is_group ? '<span class="group-tag">GROUP</span>' : ''}</div>
+        ${phoneLine}
         <div class="last">${escapeHtml(lastBody)}</div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
@@ -292,16 +396,26 @@ function renderChatPane() {
   const name = convo?.display_name || convo?.phone || state.currentJid;
   const sub = convo?.is_group ? 'Group' : (convo?.phone || '');
   pane.className = '';
+  const picUrl = convo?.profile_pic_url
+    ? `<img src="${escapeHtml(convo.profile_pic_url)}" alt="" onerror="this.remove()">`
+    : '';
+  const avatarInner = picUrl || (convo?.is_group ? '#' : escapeHtml(initials(name)));
   pane.innerHTML = `
     <div class="chat-header">
-      <div class="avatar ${convo?.is_group ? 'group' : ''}">${convo?.is_group ? '#' : escapeHtml(initials(name))}</div>
+      <div class="avatar ${convo?.is_group ? 'group' : ''}">${avatarInner}</div>
       <div>
         <div class="name">${escapeHtml(name)}</div>
         <div class="sub">${escapeHtml(sub)}</div>
       </div>
     </div>
+    <div class="reply-preview" id="reply-preview">
+      <div class="body" id="reply-preview-body"></div>
+      <button class="clear" id="reply-clear" title="Cancel reply">✕</button>
+    </div>
     <div class="messages" id="messages"></div>
+    <input type="file" id="attach-input" style="display:none" />
     <div class="compose">
+      <button class="attach-btn" id="attach-btn" title="Attach file">📎</button>
       <textarea id="compose-input" placeholder="Type a message..." rows="1"></textarea>
       <button id="send-btn" title="Send">→</button>
     </div>
@@ -321,6 +435,105 @@ function renderChatPane() {
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
   });
   $('send-btn').onclick = doSend;
+  $('attach-btn').onclick = () => $('attach-input').click();
+  $('attach-input').addEventListener('change', onAttach);
+  $('reply-clear').onclick = () => { state.replyTo = null; renderReplyPreview(); };
+  renderReplyPreview();
+
+  // Mark visible inbound messages as read on the WA side
+  const unreadIds = state.messages
+    .filter((m) => m.direction === 'in' && m.delivery_status !== 'read')
+    .map((m) => m.id);
+  if (unreadIds.length) {
+    markReadCall(state.session, state.currentJid, unreadIds).catch(() => {});
+  }
+}
+
+function renderReplyPreview() {
+  const wrap = $('reply-preview');
+  if (!wrap) return;
+  if (!state.replyTo) {
+    wrap.classList.remove('visible');
+    return;
+  }
+  $('reply-preview-body').textContent = `Replying: ${state.replyTo.body || '[message]'}`;
+  wrap.classList.add('visible');
+}
+
+async function onAttach(e) {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  if (file.size > 25 * 1024 * 1024) {
+    alert('File too large (max 25 MB).');
+    e.target.value = '';
+    return;
+  }
+  const caption = $('compose-input').value.trim() || undefined;
+  $('attach-btn').disabled = true;
+  try {
+    const base64 = await fileToBase64(file);
+    const kind = fileKind(file.type);
+    await sendMediaCall(
+      state.session, state.currentJid, base64, kind,
+      file.type || undefined, file.name, caption,
+      state.replyTo?.id,
+    );
+    $('compose-input').value = '';
+    state.replyTo = null;
+    renderReplyPreview();
+    await refreshOpenChat();
+  } catch (err) {
+    alert('Send media failed: ' + err.message);
+  } finally {
+    $('attach-btn').disabled = false;
+    e.target.value = '';
+  }
+}
+
+async function reactToMessage(msg) {
+  const picker = document.createElement('div');
+  picker.className = 'emoji-picker visible';
+  picker.style.cssText = 'position:fixed; z-index: 1000;';
+  picker.innerHTML = REACTION_SET
+    .map((e) => `<button data-e="${e}">${e}</button>`)
+    .concat([`<button data-e="">✕</button>`])
+    .join('');
+  const rect = event?.target?.getBoundingClientRect?.() ?? { left: 100, top: 100 };
+  picker.style.left = `${rect.left}px`;
+  picker.style.top = `${rect.top - 44}px`;
+  document.body.appendChild(picker);
+  const cleanup = () => { picker.remove(); document.removeEventListener('click', off, true); };
+  const off = (ev) => { if (!picker.contains(ev.target)) cleanup(); };
+  setTimeout(() => document.addEventListener('click', off, true), 0);
+  picker.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('button');
+    if (!btn) return;
+    const emoji = btn.dataset.e;
+    cleanup();
+    try {
+      await reactCall(state.session, msg.chat_jid, msg.id, emoji);
+      await refreshOpenChat();
+    } catch (e) {
+      alert('Reaction failed: ' + e.message);
+    }
+  });
+}
+
+async function deleteOwnMessage(msg) {
+  if (!confirm('Delete this message for everyone?')) return;
+  try {
+    await deleteMessageCall(state.session, msg.chat_jid, msg.id);
+    await refreshOpenChat();
+  } catch (e) { alert('Delete failed: ' + e.message); }
+}
+
+function startReply(msg) {
+  state.replyTo = {
+    id: msg.id,
+    body: msg.body || `[${msg.type}]`,
+  };
+  renderReplyPreview();
+  $('compose-input')?.focus();
 }
 
 function renderMessages() {
@@ -343,14 +556,85 @@ function renderMessages() {
       lastDay = dayKey;
     }
     const b = document.createElement('div');
-    b.className = 'bubble ' + (m.direction === 'in' ? 'in' : 'out');
-    const senderLine = (m.direction === 'in' && m.from_display_name)
+    const isOut = m.direction === 'out';
+    b.className = 'bubble ' + (isOut ? 'out' : 'in') + (m.deleted_at ? ' deleted' : '');
+
+    const senderLine = (!isOut && m.from_display_name)
       ? `<div class="sender">${escapeHtml(m.from_display_name)}</div>` : '';
-    const body = m.body
-      ? escapeHtml(m.body).replace(/\n/g, '<br>')
-      : `<span class="non-text">[${escapeHtml(m.type)}]</span>`;
-    b.innerHTML = `${senderLine}${body}<div class="meta">${fmtTime(m.ts)}</div>`;
+
+    const replyLine = m.quoted
+      ? `<div class="reply-quote">${escapeHtml((m.quoted.body_preview || '[message]').slice(0, 120))}</div>`
+      : '';
+
+    let bodyHtml = '';
+    if (m.deleted_at) {
+      bodyHtml = '<span class="non-text">🗑️ message deleted</span>';
+    } else if (m.media_url) {
+      const url = mediaUrlWithToken(m.media_url);
+      const caption = m.body ? escapeHtml(m.body).replace(/\n/g, '<br>') : '';
+      if (m.type === 'image' || m.type === 'sticker') {
+        bodyHtml = `<img class="media" src="${url}" alt="image" />` + (caption ? `<div style="margin-top:6px">${caption}</div>` : '');
+      } else if (m.type === 'video') {
+        bodyHtml = `<video class="media" controls src="${url}"></video>` + (caption ? `<div style="margin-top:6px">${caption}</div>` : '');
+      } else if (m.type === 'audio') {
+        bodyHtml = `<audio class="media" controls src="${url}"></audio>`;
+      } else if (m.type === 'document') {
+        const fname = (m.media_url.split('/').pop() || 'file').split('?')[0];
+        bodyHtml = `<div class="doc">📄 <a href="${url}" download="${escapeHtml(fname)}">${escapeHtml(fname)}</a></div>` + (caption ? `<div style="margin-top:6px">${caption}</div>` : '');
+      } else {
+        bodyHtml = `<a href="${url}">[${escapeHtml(m.type)}]</a>`;
+      }
+    } else if (m.body) {
+      bodyHtml = escapeHtml(m.body).replace(/\n/g, '<br>');
+    } else {
+      bodyHtml = `<span class="non-text">[${escapeHtml(m.type)}]</span>`;
+    }
+
+    const ticks = statusTicks(m.direction, m.delivery_status);
+    const editedTag = m.edited_at ? ' <span class="non-text" style="font-size:10px">(edited)</span>' : '';
+
+    const actions = m.deleted_at ? '' : `
+      <div class="actions">
+        <button data-act="reply" title="Reply">↩︎</button>
+        <button data-act="react" title="React">😊</button>
+        ${isOut ? '<button data-act="delete" title="Delete">🗑️</button>' : ''}
+      </div>
+    `;
+
+    b.innerHTML = `
+      ${senderLine}
+      ${replyLine}
+      ${bodyHtml}
+      <div class="meta">${editedTag}${fmtTime(m.ts)}${ticks}</div>
+      ${actions}
+    `;
+
+    b.querySelectorAll('button[data-act]').forEach((btn) => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const act = btn.dataset.act;
+        if (act === 'reply') startReply(m);
+        else if (act === 'react') reactToMessage(m);
+        else if (act === 'delete') deleteOwnMessage(m);
+      });
+    });
+
     root.appendChild(b);
+
+    // Reactions row
+    if (m.reactions?.length) {
+      const row = document.createElement('div');
+      row.className = 'reactions-row ' + (isOut ? 'out' : '');
+      // group by emoji
+      const grouped = {};
+      for (const r of m.reactions) {
+        grouped[r.emoji] = (grouped[r.emoji] || 0) + 1;
+      }
+      row.innerHTML = Object.entries(grouped)
+        .map(([e, n]) => `<span class="reaction-pill" title="reaction">${escapeHtml(e)} ${n > 1 ? n : ''}</span>`)
+        .join('');
+      root.appendChild(row);
+    }
   }
   root.scrollTop = root.scrollHeight;
 }
@@ -361,9 +645,13 @@ async function doSend() {
   if (!text || !state.currentJid) return;
   $('send-btn').disabled = true;
   try {
-    await sendMessage(state.session, state.currentJid, text);
+    await sendMessage(state.session, state.currentJid, text, {
+      quoted_id: state.replyTo?.id,
+    });
     input.value = '';
     input.style.height = 'auto';
+    state.replyTo = null;
+    renderReplyPreview();
     await refreshOpenChat();
   } catch (e) {
     alert('Send failed: ' + e.message);
