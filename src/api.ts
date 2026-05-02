@@ -21,6 +21,7 @@ import {
 } from './db.js'
 import { dispatchTest } from './webhook.js'
 import { WEBHOOK_URL } from './env.js'
+import { getUpdates } from './updates.js'
 
 const log = pino({ level: 'info' }).child({ mod: 'api' })
 
@@ -238,6 +239,7 @@ export async function startApi(): Promise<void> {
     ok: true,
     sessions: wa.list(),
     ts: Date.now(),
+    updates: getUpdates(),
   }))
 
   // ---- conversations / messages ----

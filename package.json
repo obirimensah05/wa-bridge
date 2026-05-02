@@ -3,7 +3,12 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Private WhatsApp bridge for 3 personal numbers, exposed to AI agents over MCP.",
+  "description": "Self-hosted WhatsApp bridge for AI agents — REST + MCP + web UI, built on Baileys.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/obirimensah05/wa-bridge.git"
+  },
+  "homepage": "https://github.com/obirimensah05/wa-bridge",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",

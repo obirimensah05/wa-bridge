@@ -50,6 +50,9 @@
   header .spacer { flex: 1; }
   header button { background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
     padding: 4px 10px; border-radius: 6px; }
+  #update-pill { font-size: 12px; padding: 3px 8px; border-radius: 999px;
+    background: #5b3a08; color: #ffd58a; border: 1px solid #7a5012; text-decoration: none; }
+  #update-pill:hover { background: #7a5012; }
 
   main { flex: 1; display: flex; min-height: 0; }
   aside { width: 340px; background: var(--panel); border-right: 1px solid var(--border);
@@ -179,6 +182,7 @@
     <div class="brand">wa-bridge</div>
     <span class="dot" id="conn-dot"></span>
     <select id="session-select"></select>
+    <a id="update-pill" href="#" title="" hidden>Update available</a>
     <div class="spacer"></div>
     <button id="logout-btn">Logout</button>
   </header>
@@ -812,11 +816,28 @@ $('search-input').addEventListener('input', (e) => {
   renderConversations();
 });
 
+function renderUpdatePill(updates) {
+  const pill = $('update-pill');
+  if (!pill || !updates) return;
+  const parts = [];
+  if (updates.baileys?.behind && updates.baileys?.latest) {
+    parts.push(`Baileys ${updates.baileys.current} → ${updates.baileys.latest}`);
+  }
+  if (updates.wabridge?.behind && updates.wabridge?.latest_sha) {
+    parts.push(`wa-bridge ${updates.wabridge.current_sha.slice(0,7)} → ${updates.wabridge.latest_sha.slice(0,7)}`);
+  }
+  if (!parts.length) { pill.hidden = true; return; }
+  pill.hidden = false;
+  pill.textContent = 'Update available';
+  pill.title = parts.join(' • ');
+}
+
 // ---------- Boot ----------
 async function boot() {
   try {
     const h = await getHealth();
     state.sessions = h.sessions || [];
+    renderUpdatePill(h.updates);
     if (!state.sessions.length) {
       showLogin('No sessions paired yet. Run `npm run start -- <name> <number>` first.');
       return;

@@ -4,6 +4,7 @@ import pino from 'pino'
 import { wa, scanRegisteredSessions } from './wa.js'
 import { startApi } from './api.js'
 import { HOST } from './env.js'
+import { startUpdateWatcher } from './updates.js'
 
 const log = pino({ level: 'info' }).child({ mod: 'main' })
 
@@ -58,5 +59,7 @@ if (newSession) {
     process.exit(1)
   }
 }
+
+startUpdateWatcher()
 
 await startApi()

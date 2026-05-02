@@ -273,6 +273,28 @@ class WaManager {
       printQRInTerminal: false,
       syncFullHistory: true,
       markOnlineOnConnect: false,
+      // When the recipient (or the sender's own phone) cannot decrypt a message
+      // because it came online late or its session rotated, WhatsApp asks the
+      // sender to retransmit the plaintext. Without this callback Baileys returns
+      // undefined and the recipient is stuck on "Waiting for this message…".
+      getMessage: async (key) => {
+        if (!key.id) return undefined
+        const fullId = `${name}:${key.id}`
+        try {
+          const row = (await import('./db.js')).db
+            .prepare('SELECT body, type, raw_json FROM messages WHERE id = ?')
+            .get(fullId) as { body: string | null; type: string; raw_json: string | null } | undefined
+          if (!row) return undefined
+          if (row.type === 'text' && row.body) return { conversation: row.body }
+          if (row.raw_json) {
+            try {
+              const parsed = JSON.parse(row.raw_json) as { message?: unknown }
+              return (parsed.message as any) ?? undefined
+            } catch { /* fall through */ }
+          }
+          return undefined
+        } catch { return undefined }
+      },
     })
 
     this.sessions.set(name, sock)
