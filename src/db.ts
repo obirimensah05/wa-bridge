@@ -435,6 +435,148 @@ export function phoneFor(session: string, jid: string): string | null {
   return null
 }
 
+// ---- contact resolution (LID / phone / name → unified contact view) ----
+
+export interface ResolvedContact {
+  query: string
+  matched: boolean
+  display_name: string | null
+  canonical_jid: string | null
+  is_lid: boolean
+  phone: string | null
+  jids: string[]            // canonical first, then alias forms
+  alias_jids: string[]      // jids excluding canonical
+  push_name: string | null
+  profile_pic_url: string | null
+  first_seen: number | null
+  last_seen: number | null
+}
+
+const contactRowStmt = db.prepare(
+  `SELECT jid, push_name, is_lid, profile_pic_url, first_seen, last_seen
+   FROM contacts WHERE jid = ?`,
+)
+
+const searchContactsByNameStmt = db.prepare(
+  `SELECT jid, push_name, last_seen
+   FROM contacts
+   WHERE push_name IS NOT NULL AND push_name LIKE ? COLLATE NOCASE
+   ORDER BY last_seen DESC
+   LIMIT ?`,
+)
+
+// @s.whatsapp.net wins (carries the phone), then @lid, then any other shape.
+function pickCanonical(jids: string[]): string {
+  const pn = jids.find((j) => j.endsWith('@s.whatsapp.net'))
+  if (pn) return pn
+  const lid = jids.find((j) => j.endsWith('@lid'))
+  if (lid) return lid
+  return jids[0]
+}
+
+function emptyResolved(query: string): ResolvedContact {
+  return {
+    query,
+    matched: false,
+    display_name: null,
+    canonical_jid: null,
+    is_lid: false,
+    phone: null,
+    jids: [],
+    alias_jids: [],
+    push_name: null,
+    profile_pic_url: null,
+    first_seen: null,
+    last_seen: null,
+  }
+}
+
+function buildResolvedFromJid(query: string, session: string, anchorJid: string): ResolvedContact {
+  const group = expandJidGroup(session, anchorJid)
+  const canonical = pickCanonical(group)
+  const ordered = [canonical, ...group.filter((j) => j !== canonical)]
+  const alias_jids = ordered.slice(1)
+
+  let push_name: string | null = null
+  let profile_pic_url: string | null = null
+  let first_seen: number | null = null
+  let last_seen: number | null = null
+  let anyContactRow = false
+  for (const j of ordered) {
+    const row = contactRowStmt.get(j) as
+      | { jid: string; push_name: string | null; is_lid: number; profile_pic_url: string | null; first_seen: number; last_seen: number }
+      | undefined
+    if (!row) continue
+    anyContactRow = true
+    if (!push_name && row.push_name) push_name = row.push_name
+    if (!profile_pic_url && row.profile_pic_url) profile_pic_url = row.profile_pic_url
+    if (first_seen == null || row.first_seen < first_seen) first_seen = row.first_seen
+    if (last_seen == null || row.last_seen > last_seen) last_seen = row.last_seen
+  }
+
+  return {
+    query,
+    matched: anyContactRow || alias_jids.length > 0,
+    display_name: push_name,
+    canonical_jid: canonical,
+    is_lid: canonical.endsWith('@lid'),
+    phone: phoneFor(session, canonical),
+    jids: ordered,
+    alias_jids,
+    push_name,
+    profile_pic_url,
+    first_seen,
+    last_seen,
+  }
+}
+
+export function searchContacts(session: string, q: string, limit = 20): ResolvedContact[] {
+  const trimmed = q.trim()
+  if (!trimmed) return []
+  // pull a wider slice so that when collapsing aliases we still end up with
+  // ~limit distinct people.
+  const rows = searchContactsByNameStmt.all(`%${trimmed}%`, limit * 4) as Array<{
+    jid: string
+    push_name: string
+    last_seen: number
+  }>
+  const seen = new Set<string>()
+  const out: ResolvedContact[] = []
+  for (const r of rows) {
+    const resolved = buildResolvedFromJid(trimmed, session, r.jid)
+    if (!resolved.canonical_jid) continue
+    if (seen.has(resolved.canonical_jid)) continue
+    seen.add(resolved.canonical_jid)
+    out.push(resolved)
+    if (out.length >= limit) break
+  }
+  return out
+}
+
+// Accepts a JID, a phone (digits or +digits), or a contact-name substring and
+// returns the best single match. For ambiguous name queries this returns the
+// most recently seen contact; use `searchContacts` to enumerate alternatives.
+export function resolveContact(session: string, q: string): ResolvedContact {
+  const trimmed = q.trim()
+  if (!trimmed) return emptyResolved(trimmed)
+
+  if (trimmed.includes('@')) {
+    return buildResolvedFromJid(trimmed, session, trimmed)
+  }
+
+  // Phone: digits-only, or +digits, optionally with separator chars
+  const stripped = trimmed.replace(/[\s().-]/g, '')
+  const digitsOnly = /^\+?\d{7,}$/.test(stripped)
+  if (digitsOnly) {
+    const digits = stripped.replace(/^\+/, '')
+    return buildResolvedFromJid(trimmed, session, `${digits}@s.whatsapp.net`)
+  }
+
+  const matches = searchContacts(session, trimmed, 20)
+  if (matches.length > 0) return matches[0]
+  return emptyResolved(trimmed)
+}
+
 export function recentMessages(session: string, limit = 20) {
   return db
     .prepare(

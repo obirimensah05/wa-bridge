@@ -119,6 +119,36 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'resolve_contact',
+      description:
+        'Resolve a single query to a contact. The query can be (a) a JID — "<digits>@s.whatsapp.net", "<id>@lid", or "<id>@g.us"; (b) a phone number in international format ("+49…" or just digits); or (c) a saved contact-name substring (case-insensitive). Returns the canonical PN-form JID, display name, phone, and every known alias JID for that person. Use this to answer "who is <lid>?" or "what JID do I send to for <name>?".',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          q: {
+            type: 'string',
+            description: 'JID, phone (digits or +digits), or contact-name substring.',
+          },
+          session: { type: 'string', description: 'Session name. Default: "main".' },
+        },
+        required: ['q'],
+      },
+    },
+    {
+      name: 'search_contacts',
+      description:
+        'Search saved contacts by name substring (case-insensitive). Returns up to `limit` distinct people, each with the same shape as resolve_contact (canonical JID, display name, phone, alias JIDs). Use when the operator gives an ambiguous name and you want to enumerate candidates.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          q: { type: 'string', description: 'Name substring to match.' },
+          limit: { type: 'integer', description: 'Max distinct people. Default 20, max 100.' },
+          session: { type: 'string', description: 'Session name. Default: "main".' },
+        },
+        required: ['q'],
+      },
+    },
+    {
       name: 'merge_jids',
       description:
         'Mark two JIDs as the same person. After merging, list_conversations collapses them and read_conversation returns combined history regardless of which JID is queried. Pass the @lid form as alias and the @s.whatsapp.net form as canonical, so phone-number metadata is preserved.',
@@ -352,6 +382,25 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       return {
         content: [{ type: 'text', text: JSON.stringify(data.aliases, null, 2) }],
       }
+    }
+
+    if (name === 'resolve_contact') {
+      const q = String(args.q ?? '')
+      if (!q) throw new Error('q is required')
+      const data = await api<unknown>(
+        `/v1/contacts/resolve?session=${encodeURIComponent(session)}&q=${encodeURIComponent(q)}`,
+      )
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    }
+
+    if (name === 'search_contacts') {
+      const q = String(args.q ?? '')
+      if (!q) throw new Error('q is required')
+      const limit = Math.min(Number(args.limit ?? 20), 100)
+      const data = await api<unknown>(
+        `/v1/contacts/search?session=${encodeURIComponent(session)}&q=${encodeURIComponent(q)}&limit=${limit}`,
+      )
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
     }
 
     if (name === 'merge_jids') {

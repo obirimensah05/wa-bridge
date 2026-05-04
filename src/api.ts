@@ -17,6 +17,9 @@ import {
   phoneFor,
   reactionsFor,
   receiptsFor,
+  resolveContact,
+  searchContacts,
+  expandJidGroup,
   db,
 } from './db.js'
 import { dispatchTest } from './webhook.js'
@@ -62,9 +65,15 @@ function enrichConvo(session: string, row: any) {
   const lastBody = row.last_type === 'audio' && row.last_transcript
     ? `[audio] ${row.last_transcript}`
     : row.last_body
+  // chat_jid is already the canonical-after-CTE-collapse; surface the LID-ness
+  // and any alias forms so the UI / agents can see when a conversation is
+  // LID-only (no phone known) vs fully resolved.
+  const aliases = isGroup ? [] : expandJidGroup(session, row.chat_jid).filter((j) => j !== row.chat_jid)
   return {
     chat_jid: row.chat_jid,
     is_group: !!row.is_group,
+    is_lid: !isGroup && row.chat_jid.endsWith('@lid'),
+    alias_jids: aliases,
     archived: !!row.archived,
     pinned: !!row.pinned,
     unread_count: row.unread_count ?? 0,
@@ -495,6 +504,32 @@ export async function startApi(): Promise<void> {
       if (!alias) { reply.code(400).send({ error: 'alias is required' }); return }
       const result = removeAlias(session, alias)
       return { ok: true, removed: result.changes }
+    },
+  )
+
+  // ---- contacts: resolve / search ----
+  // Resolve a single query — JID, phone (digits or +digits), or name substring —
+  // to a unified ContactInfo: display name, canonical PN-form JID, phone, plus
+  // every known alias JID. Designed for operator workflows like "who is
+  // 12345@lid?" and "what's John Smith's JID so I can send them a message?".
+  app.get<{ Querystring: { session?: string; q?: string } }>(
+    '/v1/contacts/resolve',
+    async (req, reply) => {
+      const session = req.query.session ?? 'main'
+      const q = req.query.q
+      if (!q) { reply.code(400).send({ error: 'q query param required' }); return }
+      return resolveContact(session, q)
+    },
+  )
+
+  app.get<{ Querystring: { session?: string; q?: string; limit?: string } }>(
+    '/v1/contacts/search',
+    async (req, reply) => {
+      const session = req.query.session ?? 'main'
+      const q = req.query.q
+      if (!q) { reply.code(400).send({ error: 'q query param required' }); return }
+      const limit = Math.min(Number(req.query.limit ?? 20), 100)
+      return { query: q, matches: searchContacts(session, q, limit) }
     },
   )
 
