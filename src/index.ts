@@ -3,7 +3,7 @@ import pino from 'pino'
 
 import { wa, scanRegisteredSessions } from './wa.js'
 import { startApi } from './api.js'
-import { HOST } from './env.js'
+import { HOST, TIMEZONE } from './env.js'
 import { startUpdateWatcher } from './updates.js'
 
 const log = pino({ level: 'info' }).child({ mod: 'main' })
@@ -26,6 +26,23 @@ const newSession =
   arg1 && arg2 ? { name: arg1, number: arg2.replace(/[^0-9]/g, '') } : null
 
 const alreadyPaired = scanRegisteredSessions()
+
+if (alreadyPaired.length > 1) {
+  log.error(
+    { found: alreadyPaired },
+    'multi-session is disabled — only one paired session is allowed at a time. Remove the extras from ./auth/ and restart.',
+  )
+  process.exit(1)
+}
+
+if (newSession && alreadyPaired.length > 0 && !alreadyPaired.includes(newSession.name)) {
+  log.error(
+    { paired: alreadyPaired, pairing: newSession.name },
+    'a session is already paired — unpair first (delete ./auth/<name>/) before adding another.',
+  )
+  process.exit(1)
+}
+
 const sessionsToRestore = alreadyPaired.filter((s) => s !== newSession?.name)
 
 if (sessionsToRestore.length === 0 && !newSession) {
@@ -39,9 +56,19 @@ log.info(
   {
     restoring: sessionsToRestore,
     pairing: newSession ? `${newSession.name} (${newSession.number})` : null,
+    timezone: TIMEZONE,
   },
   'boot',
 )
+
+if (newSession) {
+  console.log(
+    `\n[setup] pairing "${newSession.name}" (${newSession.number})`,
+  )
+  console.log(
+    `[setup] timezone: ${TIMEZONE} — timestamps in CLI/logs use this zone. Change by editing WA_TZ in .env (use IANA names like Europe/Berlin, America/New_York; DST is handled).\n`,
+  )
+}
 
 for (const name of sessionsToRestore) {
   try {

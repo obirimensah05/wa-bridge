@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import pino from 'pino'
 
 const log = pino({ level: 'info' }).child({ mod: 'updates' })
@@ -113,7 +114,19 @@ async function checkWaBridge(): Promise<WaBridgeCheck | null> {
     return { current_sha, latest_sha: null, behind: false }
   }
   const latest_sha = (remote as { sha: string }).sha
-  return { current_sha, latest_sha, behind: current_sha !== latest_sha }
+
+  let behind = current_sha !== latest_sha
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', current_sha, latest_sha], {
+      stdio: 'ignore',
+      cwd: process.cwd(),
+    })
+    behind = current_sha !== latest_sha
+  } catch {
+    behind = false
+  }
+
+  return { current_sha, latest_sha, behind }
 }
 
 export async function refreshUpdates(): Promise<UpdateCheck> {

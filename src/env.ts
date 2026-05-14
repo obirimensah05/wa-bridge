@@ -46,3 +46,33 @@ export const HOST = process.env.HOST ?? '127.0.0.1'
 export const WEBHOOK_URL = process.env.WEBHOOK_URL?.trim() || null
 export const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN?.trim() || null
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() || null
+
+function isValidIanaTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function ensureTimezone(): string {
+  const raw = process.env.WA_TZ?.trim()
+  if (raw && isValidIanaTimezone(raw)) return raw
+
+  if (raw && !isValidIanaTimezone(raw)) {
+    console.warn(`[env] WA_TZ=${raw} is not a valid IANA timezone — falling back to system timezone`)
+  }
+
+  const systemTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+
+  let content = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, 'utf8') : ''
+  if (content && !content.endsWith('\n')) content += '\n'
+  content += `WA_TZ=${systemTz}\n`
+  writeFileSync(ENV_PATH, content)
+  process.env.WA_TZ = systemTz
+  console.log(`[env] timezone set to ${systemTz} (saved to ${ENV_PATH}; edit WA_TZ to override — use IANA names like Europe/Berlin so DST is handled automatically)`)
+  return systemTz
+}
+
+export const TIMEZONE = ensureTimezone()
