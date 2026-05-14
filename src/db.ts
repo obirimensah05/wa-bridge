@@ -435,6 +435,25 @@ export function phoneFor(session: string, jid: string): string | null {
   return null
 }
 
+const chatNameByJidStmt = db.prepare(
+  `SELECT name FROM chats WHERE session = ? AND jid = ? AND name IS NOT NULL`,
+)
+
+export function chatNameFor(session: string, jid: string): string | null {
+  for (const j of expandJidGroup(session, jid)) {
+    const row = chatNameByJidStmt.get(session, j) as { name: string } | undefined
+    if (row?.name) return row.name
+  }
+  return null
+}
+
+export function displayNameFor(session: string, jid: string): string {
+  if (jid.endsWith('@g.us')) {
+    return chatNameFor(session, jid) ?? jid
+  }
+  return pushNameFor(session, jid) ?? phoneFor(session, jid) ?? jid
+}
+
 // ---- contact resolution (LID / phone / name → unified contact view) ----
 
 export interface ResolvedContact {

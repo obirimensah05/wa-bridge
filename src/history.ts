@@ -1,4 +1,4 @@
-import { recentMessages } from './db.js'
+import { recentMessages, displayNameFor, pushNameFor, phoneFor } from './db.js'
 import { TIMEZONE } from './env.js'
 import { formatLocal } from './time.js'
 
@@ -12,10 +12,18 @@ if (rows.length === 0) {
   process.exit(0)
 }
 
+function label(chat_jid: string, from_jid: string): string {
+  const chat = displayNameFor(session, chat_jid)
+  if (!chat_jid.endsWith('@g.us')) return chat
+  const sender = pushNameFor(session, from_jid) ?? phoneFor(session, from_jid) ?? from_jid
+  return `${chat} · ${sender}`
+}
+
 console.log(`# session=${session}  tz=${TIMEZONE}`)
 for (const r of rows.reverse()) {
   const time = formatLocal(r.ts)
   const arrow = r.direction === 'in' ? '<-' : '->'
   const body = r.body ?? `[${r.type}]`
-  console.log(`${time}  ${arrow}  ${r.chat_jid}  |  ${body}`)
+  const who = label(r.chat_jid, r.from_jid)
+  console.log(`${time}  ${arrow}  ${who}  |  ${body}`)
 }
