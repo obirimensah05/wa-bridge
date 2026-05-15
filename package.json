@@ -18,7 +18,11 @@
     "mcp": "tsx src/mcp.ts",
     "import-contacts": "tsx src/import-contacts.ts",
     "backup": "tsx src/backup-db.ts",
-    "transcribe-backlog": "tsx src/transcribe-backlog.ts"
+    "transcribe-backlog": "tsx src/transcribe-backlog.ts",
+    "autoreply": "tsx src/autoreply-index.ts",
+    "autoreply:dev": "tsx watch src/autoreply-index.ts",
+    "autoreply:build-corpus": "tsx src/autoreply-corpus.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

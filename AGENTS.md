@@ -13,6 +13,8 @@ You are an AI / coding agent (Claude Code, Codex, Hermes, custom) working with t
 
 Treat it as personal infrastructure for **one operator on one number** — not a multi-tenant product.
 
+An optional **autoreply sidecar** (`src/autoreply-*.ts`, separate process) consumes the inbound webhook, drafts replies in the operator's voice, and can auto-send through the REST API under policy + safety gates. See [docs/autoreply.md](docs/autoreply.md) for its env vars, routes, and safety contract. The sidecar is not in scope for normal MCP tool work — only touch it when explicitly asked.
+
 > **Single-session lock.** As of 2026-05, the bridge refuses to boot with more than one paired session under `auth/` and refuses to pair a second number while one already exists. To switch numbers: `rm -rf auth/<name>/` and re-pair. Multi-session plumbing (DB `session` column, MCP `session` param) is intact — just runtime-locked.
 
 ## Mental model

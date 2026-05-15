@@ -149,6 +149,17 @@ claude mcp add-json wa-bridge --scope user "{
 
 The daemon must be running for any MCP tool to do anything.
 
+## Autoreply sidecar (optional)
+
+A separate local process (`src/autoreply-*.ts`) that consumes the inbound webhook, generates draft replies in the operator's voice via Claude, sends Telegram notifications, and can optionally auto-send through the wa-bridge REST API under policy + safety gates. Runs alongside the daemon on its own port.
+
+```bash
+npm run autoreply               # boot sidecar
+npm run autoreply:build-corpus  # rebuild style corpus from WA history + second brain
+```
+
+Full reference (env vars, routes, policy modes, safety gates): [docs/autoreply.md](docs/autoreply.md).
+
 ## Inbound webhook (optional)
 
 Set `WEBHOOK_URL` in `.env` and restart. Every inbound message POSTs:
@@ -200,6 +211,10 @@ All variables are read from `.env` at startup; all are optional with sensible de
 | `npm run transcribe-backlog` | Run Whisper over past audio messages without transcripts. |
 | `npm run backup` | SQLite backup of `data/wa.db` into `data/backups/`. |
 | `npm run mcp` | Spawn the MCP stdio server (Claude Code launches this automatically). |
+| `npm run autoreply` | Boot the local autoreply sidecar (separate process). See [docs/autoreply.md](docs/autoreply.md). |
+| `npm run autoreply:dev` | Same, with `tsx --watch`. |
+| `npm run autoreply:build-corpus` | Rebuild the style corpus from outbound WhatsApp history + second-brain notes. |
+| `npm run typecheck` | `tsc --noEmit` — strict mode is on. |
 
 See [COMMANDS.md](COMMANDS.md) for the full reference including REST examples and common ops.
 

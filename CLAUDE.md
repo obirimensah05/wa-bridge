@@ -6,6 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `README.md` — user-facing setup, REST API table, env vars
 - `AGENTS.md` — connecting-agent contract (MCP tools, safety rules, data model). Read this if you're touching MCP tool surfaces or anything that an external agent calls.
+- `docs/autoreply.md` — autoreply sidecar reference (env vars, routes, policy modes, safety gates). Read this if you're touching `src/autoreply-*.ts`.
 
 This file deliberately does not duplicate them. Read them when the topic is in scope.
 
